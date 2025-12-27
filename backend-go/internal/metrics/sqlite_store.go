@@ -20,6 +20,8 @@ type SQLiteStore struct {
 	// 写入缓冲区
 	writeBuffer []PersistentRecord
 	bufferMu    sync.Mutex
+	// 统计：丢弃记录数（缓冲区满/写入失败回退时）
+	droppedRecords int64
 
 	// 配置
 	batchSize     int           // 批量写入阈值（记录数）
@@ -43,6 +45,8 @@ type SQLiteStoreConfig struct {
 const (
 	defaultBatchSize     = 100              // 批量写入阈值
 	defaultFlushInterval = 30 * time.Second // 定时刷新间隔
+	maxBufferMultiplier  = 50               // 写入缓冲区上限倍数（相对 batchSize）
+	maxFlushRetries      = 3                // flush 写入失败最大重试次数
 )
 
 // NewSQLiteStore 创建 SQLite 存储
@@ -89,7 +93,7 @@ func NewSQLiteStore(cfg *SQLiteStoreConfig) (*SQLiteStore, error) {
 	store := &SQLiteStore{
 		db:            db,
 		dbPath:        cfg.DBPath,
-		writeBuffer:   make([]PersistentRecord, 0, defaultBatchSize),
+		writeBuffer:   make([]PersistentRecord, 0, defaultBatchSize*maxBufferMultiplier),
 		batchSize:     defaultBatchSize,
 		flushInterval: defaultFlushInterval,
 		retentionDays: cfg.RetentionDays,
@@ -211,6 +215,14 @@ func (s *SQLiteStore) AddRecord(record PersistentRecord) {
 		s.bufferMu.Unlock()
 		return // 已关闭，忽略新记录
 	}
+
+	maxBuffer := s.batchSize * maxBufferMultiplier
+	if maxBuffer > 0 && len(s.writeBuffer) >= maxBuffer {
+		s.droppedRecords++
+		s.bufferMu.Unlock()
+		return
+	}
+
 	s.writeBuffer = append(s.writeBuffer, record)
 	shouldFlush := len(s.writeBuffer) >= s.batchSize
 	s.bufferMu.Unlock()
@@ -240,21 +252,62 @@ func (s *SQLiteStore) flush() {
 
 	// 取出缓冲区数据
 	records := s.writeBuffer
-	s.writeBuffer = make([]PersistentRecord, 0, s.batchSize)
+	s.writeBuffer = make([]PersistentRecord, 0, s.batchSize*maxBufferMultiplier)
 	s.bufferMu.Unlock()
 
 	// 批量写入
-	if err := s.batchInsertRecords(records); err != nil {
+	if err := s.batchInsertWithRetry(records); err != nil {
 		log.Printf("[SQLite-Flush] 警告: 批量写入指标记录失败: %v", err)
-		// 失败时将记录放回缓冲区（限制重试，避免无限增长）
-		s.bufferMu.Lock()
-		if len(s.writeBuffer) < s.batchSize*10 { // 最多保留 10 倍缓冲
-			s.writeBuffer = append(records, s.writeBuffer...)
-		} else {
-			log.Printf("[SQLite-Flush] 警告: 写入缓冲区已满，丢弃 %d 条记录", len(records))
-		}
-		s.bufferMu.Unlock()
+		s.requeueOrDropOnFailure(records)
 	}
+}
+
+func (s *SQLiteStore) batchInsertWithRetry(records []PersistentRecord) error {
+	var lastErr error
+	backoff := 100 * time.Millisecond
+	for attempt := 1; attempt <= maxFlushRetries; attempt++ {
+		if err := s.batchInsertRecords(records); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if attempt < maxFlushRetries {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
+	return lastErr
+}
+
+func (s *SQLiteStore) requeueOrDropOnFailure(records []PersistentRecord) {
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
+
+	maxBuffer := s.batchSize * maxBufferMultiplier
+	if maxBuffer <= 0 {
+		s.droppedRecords += int64(len(records))
+		return
+	}
+
+	// 失败回退时：优先保留 flush 期间新增的记录，再尽量回填本次 flush 的记录（只保留较新的那部分）。
+	available := maxBuffer - len(s.writeBuffer)
+	if available <= 0 {
+		s.droppedRecords += int64(len(records))
+		log.Printf("[SQLite-Flush] 警告: 写入缓冲区已满，丢弃 %d 条记录", len(records))
+		return
+	}
+
+	keep := records
+	if len(records) > available {
+		// 只保留较新的那部分
+		keep = records[len(records)-available:]
+		dropped := len(records) - len(keep)
+		s.droppedRecords += int64(dropped)
+		log.Printf("[SQLite-Flush] 警告: 写入缓冲区容量不足，丢弃 %d 条旧记录", dropped)
+	}
+
+	s.writeBuffer = append(keep, s.writeBuffer...)
 }
 
 // batchInsertRecords 批量插入记录
@@ -267,7 +320,7 @@ func (s *SQLiteStore) batchInsertRecords(records []PersistentRecord) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.Prepare(`
 		INSERT INTO request_records
@@ -408,7 +461,44 @@ func (s *SQLiteStore) Close() error {
 	// 等待所有异步 flush 完成
 	s.flushWg.Wait()
 
+	// 关闭前最后尽力刷新（避免 flush 失败导致残留缓冲）
+	for i := 0; i < maxFlushRetries; i++ {
+		s.bufferMu.Lock()
+		empty := len(s.writeBuffer) == 0
+		s.bufferMu.Unlock()
+		if empty {
+			break
+		}
+		s.flush()
+	}
+
 	return s.db.Close()
+}
+
+// WriteBufferStats 写入缓冲区统计（用于监控/排查）
+type WriteBufferStats struct {
+	BufferedRecords    int     `json:"bufferedRecords"`
+	MaxBufferRecords   int     `json:"maxBufferRecords"`
+	BufferUsage        float64 `json:"bufferUsage"`
+	DroppedRecordCount int64   `json:"droppedRecordCount"`
+}
+
+func (s *SQLiteStore) GetWriteBufferStats() WriteBufferStats {
+	s.bufferMu.Lock()
+	defer s.bufferMu.Unlock()
+
+	maxBuffer := s.batchSize * maxBufferMultiplier
+	usage := float64(0)
+	if maxBuffer > 0 {
+		usage = float64(len(s.writeBuffer)) / float64(maxBuffer)
+	}
+
+	return WriteBufferStats{
+		BufferedRecords:    len(s.writeBuffer),
+		MaxBufferRecords:   maxBuffer,
+		BufferUsage:        usage,
+		DroppedRecordCount: s.droppedRecords,
+	}
 }
 
 // GetRecordCount 获取记录总数（用于调试）
