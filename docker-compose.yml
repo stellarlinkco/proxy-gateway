@@ -1,30 +1,30 @@
 services:
   # Claude API 代理服务 (一体化架构: 后端 + 前端界面)
   claude-proxy:
-    image: crpi-i19l8zl0ugidq97v.cn-hangzhou.personal.cr.aliyuncs.com/bene/claude-proxy:latest
+    # image: crpi-i19l8zl0ugidq97v.cn-hangzhou.personal.cr.aliyuncs.com/bene/claude-proxy:latest
     # 本地构建使用以下配置（注释掉 image 行）:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
-    #   # 中国网络使用:
-    #   # dockerfile: Dockerfile_China
-    #   target: runtime
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # 中国网络使用:
+      # dockerfile: Dockerfile_China
+      target: runtime
     container_name: claude-proxy
     ports:
       # 统一端口：前端界面 + API + 管理接口
-      - '3000:3000'
+      - '23001:3000'
     volumes:
       # 配置目录持久化
       - ./.config:/app/.config
       # 可选：日志持久化
-      - ./logs:/app/logs
+      # - ./logs:/app/logs
     environment:
       # 基础配置
       - ENV=production
       # 是否启用Web管理界面 (true=一体化模式, false=纯API模式)
       - ENABLE_WEB_UI=true
       # 代理访问密钥 - 用于验证客户端对代理服务器的访问权限
-      - PROXY_ACCESS_KEY=your-super-strong-secret-key
+      - PROXY_ACCESS_KEY=123456
       # 日志级别 (error, warn, info, debug)
       - LOG_LEVEL=warn
       # 是否启用请求日志

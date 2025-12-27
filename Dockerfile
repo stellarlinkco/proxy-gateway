@@ -1,34 +1,35 @@
-# --- 阶段 1: 准备 Bun 运行时 ---
-FROM oven/bun:alpine AS bun-runtime
+# --- 阶段 1: 前端构建 ---
+FROM node:22-alpine AS frontend-builder
 
-# --- 阶段 2: 构建阶段 (Go + Bun) ---
+WORKDIR /src/frontend
+
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# --- 阶段 2: Go 构建阶段 ---
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /src
 
-# 安装必要的构建工具和 bun 依赖（libstdc++ libgcc 是 bun:alpine 运行所需）
-RUN apk add --no-cache git make libstdc++ libgcc
-
-# 从 bun-runtime 复制 bun 和 bunx 到 Go 镜像
-COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
-COPY --from=bun-runtime /usr/local/bin/bunx /usr/local/bin/bunx
-
-# 将 bun 添加到 PATH
-ENV PATH="/usr/local/bin:${PATH}"
+# 安装必要的构建工具
+RUN apk add --no-cache git make
 
 # 复制项目必要文件（.dockerignore 会排除不需要的文件）
 COPY Makefile VERSION ./
-COPY frontend/ ./frontend/
 COPY backend-go/ ./backend-go/
 
-# 使用 bun 安装前端依赖（比 npm 快 10-100 倍）
-RUN cd frontend && bun install
+# 从前端构建阶段复制构建产物到 backend-go 嵌入目录
+RUN mkdir -p backend-go/frontend/dist
+COPY --from=frontend-builder /src/frontend/dist ./backend-go/frontend/dist
 
 # 安装 Go 后端依赖（go mod tidy 确保 go.sum 完整）
 RUN cd backend-go && go mod tidy && go mod download
 
-# 使用 Makefile 构建整个项目（前端 + 后端）
-RUN make build
+# 构建 Go 后端（前端已嵌入）
+RUN cd backend-go && make build
 
 # --- 阶段 3: 运行时 ---
 FROM alpine:latest AS runtime
