@@ -4,6 +4,100 @@
 
 ---
 
+## [v2.4.15] - 2025-12-30
+
+### 🐛 修复
+
+- **修复 Gemini API 路由注册失败** - 解决 Gin 框架路由 panic 问题：
+  - 原因：Gin 不支持 `:param\:literal` 格式，即使转义冒号也会被解析为两个通配符
+  - 方案：使用 `*modelAction` 通配符捕获 `model:action` 整体，在 handler 内解析
+  - 涉及文件：`main.go`、`internal/handlers/gemini/handler.go`
+
+### ✨ 新功能
+
+- **Gemini 历史指标 API 完整实现** - 补全 Gemini 模块的历史数据端点：
+  - `GET /api/gemini/channels/metrics/history` - 渠道级别指标历史
+  - `GET /api/gemini/channels/:id/keys/metrics/history` - Key 级别指标历史
+  - `GET /api/gemini/global/stats/history` - 全局统计历史
+  - 涉及文件：`internal/handlers/channel_metrics_handler.go`、`main.go`
+
+- **Gemini 前端管理界面完整实现** - 与 Messages/Responses 功能完全对齐：
+  - 新增 Gemini Tab 切换，支持完整渠道 CRUD、Key 管理、状态/促销设置
+  - KeyTrendChart 和 GlobalStatsChart 组件支持 Gemini 数据展示（移除降级显示）
+  - 涉及文件：`frontend/src/App.vue`、`frontend/src/components/`、`frontend/src/services/api.ts`
+
+---
+
+## [v2.4.14] - 2025-12-29
+
+### ✨ 新功能
+
+- **新增 Gemini API 模块** - 与 `/v1/messages`、`/v1/responses` 同级的完整 Gemini 代理支持：
+  - **代理端点**：`POST /v1/models/{model}:generateContent`（非流式）、`:streamGenerateContent`（流式）
+  - **协议转换**：支持 Gemini 请求转发到 Claude/OpenAI/Gemini 上游，双向转换器自动处理格式差异
+  - **渠道管理 API**：完整 CRUD、API Key 管理、状态/促销设置、指标监控（`/api/gemini/channels/*`）
+  - **多渠道调度**：集成 ChannelScheduler，支持优先级、熔断、Trace 亲和性
+  - **认证方式**：兼容 Gemini 原生格式（`x-goog-api-key` 头、`?key=` 参数）
+  - 涉及文件：`internal/handlers/gemini/`、`internal/converters/gemini_converter.go`、`internal/types/gemini.go`
+
+### 🔧 重构
+
+- **config 包模块化拆分** - 将 1973 行的单文件拆分为 6 个职责清晰的模块：
+  - `config.go`（297 行）：核心类型定义 + 共享方法
+  - `config_loader.go`（384 行）：配置加载、迁移、验证、文件监听
+  - `config_messages.go`（429 行）：Messages 渠道 CRUD
+  - `config_responses.go`（380 行）：Responses 渠道 CRUD
+  - `config_gemini.go`（361 行）：Gemini 渠道 CRUD
+  - `config_utils.go`（183 行）：工具函数（去重、模型重定向、状态辅助）
+  - 遵循单一职责原则，提升代码可维护性
+
+---
+
+## [v2.4.12] - 2025-12-29
+
+### 🐛 修复
+
+- **修复 Responses API 错误消息提取失败的问题** - 解决 upstream_error 字段无法被正确解析：
+  - 扩展 `classifyByErrorMessage` 函数：支持多个消息字段（`message`, `upstream_error`, `detail`）
+  - 支持嵌套对象格式：当 `upstream_error` 为对象时，提取其中的 `message` 字段
+  - 之前仅检查 `error.message` 字段，导致 `{type, upstream_error}` 格式的错误无法被识别
+  - 新增 4 个测试用例覆盖 upstream_error 字符串、嵌套对象、detail 字段等场景
+  - 涉及文件：`internal/handlers/common/failover.go`, `internal/handlers/common/failover_test.go`
+
+---
+
+## [v2.4.11] - 2025-12-29
+
+### 🐛 修复
+
+- **修复 Fuzzy 模式下 403 + 预扣费消息未触发 Key 降级的问题** - 补充 v2.4.10 修复的遗漏场景：
+  - 修改 `shouldRetryWithNextKeyFuzzy` 函数：新增 `bodyBytes` 参数，对非 402/429 状态码检查消息体中的配额关键词
+  - 之前 Fuzzy 模式仅检查状态码（402/429 = quota），不解析消息体，导致 403 + "预扣费额度失败" 返回 `isQuotaRelated=false`
+  - 新增 `TestShouldRetryWithNextKey_FuzzyMode_403WithQuotaMessage` 测试用例
+  - 涉及文件：`internal/handlers/common/failover.go`, `internal/handlers/common/failover_test.go`
+
+### 🔧 调试
+
+- **添加 Key 降级调试日志** - 用于追踪 `isQuotaRelated` 值和密钥降级流程：
+  - 在 `ShouldRetryWithNextKey` 调用后记录返回值（statusCode, shouldFailover, isQuotaRelated）
+  - 在密钥标记为配额相关失败时记录日志
+  - 涉及文件：`internal/handlers/messages/handler.go`
+- **改进 .env.example 文档** - 添加日志配置默认值说明（默认启用，需显式设置 false 禁用）
+
+---
+
+## [v2.4.10] - 2025-12-29
+
+### 🐛 修复
+
+- **修复 403 预扣费额度不足的 Key 未被自动降级的问题** - 解决配额不足的密钥始终被优先尝试：
+  - 修改 `shouldRetryWithNextKeyNormal` 逻辑：即使 HTTP 状态码已触发 failover，仍检查消息体确定是否为配额相关错误
+  - 之前 403 状态码直接返回 `isQuotaRelated=false`，跳过消息体解析，导致 `DeprioritizeAPIKey` 未被调用
+  - 新增 "预扣费" 关键词到 `quotaKeywords` 列表，确保匹配中文预扣费错误消息
+  - 涉及文件：`internal/handlers/common/failover.go`
+
+---
+
 ## [v2.4.9] - 2025-12-27
 
 ### 🔧 改进
