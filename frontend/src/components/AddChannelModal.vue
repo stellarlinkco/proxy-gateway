@@ -230,7 +230,7 @@
 
                   <!-- 添加新映射 -->
                   <div class="d-flex align-center ga-2">
-                    <v-select
+                    <v-combobox
                       v-model="newMapping.source"
                       label="源模型名"
                       :items="sourceModelOptions"
@@ -238,7 +238,7 @@
                       density="comfortable"
                       hide-details
                       class="flex-1-1"
-                      placeholder="选择源模型名"
+                      placeholder="选择或输入源模型名"
                     />
                     <v-icon color="primary">mdi-arrow-right</v-icon>
                     <v-text-field

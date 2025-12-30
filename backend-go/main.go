@@ -105,16 +105,19 @@ func main() {
 		}()
 	}
 
-	// 初始化多渠道调度器（Messages 和 Responses 使用独立的指标管理器）
-	var messagesMetricsManager, responsesMetricsManager *metrics.MetricsManager
+	// 初始化多渠道调度器（Messages、Responses、Gemini 使用独立的指标管理器）
+	var messagesMetricsManager, responsesMetricsManager, geminiMetricsManager *metrics.MetricsManager
 	if metricsStore != nil {
 		messagesMetricsManager = metrics.NewMetricsManagerWithPersistence(
 			envCfg.MetricsWindowSize, envCfg.MetricsFailureThreshold, metricsStore, "messages")
 		responsesMetricsManager = metrics.NewMetricsManagerWithPersistence(
 			envCfg.MetricsWindowSize, envCfg.MetricsFailureThreshold, metricsStore, "responses")
+		geminiMetricsManager = metrics.NewMetricsManagerWithPersistence(
+			envCfg.MetricsWindowSize, envCfg.MetricsFailureThreshold, metricsStore, "gemini")
 	} else {
 		messagesMetricsManager = metrics.NewMetricsManagerWithConfig(envCfg.MetricsWindowSize, envCfg.MetricsFailureThreshold)
 		responsesMetricsManager = metrics.NewMetricsManagerWithConfig(envCfg.MetricsWindowSize, envCfg.MetricsFailureThreshold)
+		geminiMetricsManager = metrics.NewMetricsManagerWithConfig(envCfg.MetricsWindowSize, envCfg.MetricsFailureThreshold)
 	}
 	traceAffinityManager := session.NewTraceAffinityManager()
 
@@ -122,7 +125,7 @@ func main() {
 	urlManager := warmup.NewURLManager(30*time.Second, 3) // 30秒冷却期，连续3次失败后移到末尾
 	log.Printf("[URLManager-Init] URL管理器已初始化 (冷却期: 30秒, 最大连续失败: 3)")
 
-	channelScheduler := scheduler.NewChannelScheduler(cfgManager, messagesMetricsManager, responsesMetricsManager, traceAffinityManager, urlManager)
+	channelScheduler := scheduler.NewChannelScheduler(cfgManager, messagesMetricsManager, responsesMetricsManager, geminiMetricsManager, traceAffinityManager, urlManager)
 	log.Printf("[Scheduler-Init] 多渠道调度器已初始化 (失败率阈值: %.0f%%, 滑动窗口: %d)",
 		messagesMetricsManager.GetFailureThreshold()*100, messagesMetricsManager.GetWindowSize())
 
@@ -144,9 +147,6 @@ func main() {
 
 	// 健康检查端点（固定路径 /health，与 Dockerfile HEALTHCHECK 保持一致）
 	r.GET("/health", handlers.HealthCheck(envCfg, cfgManager))
-
-	// 配置重载端点
-	r.POST("/admin/config/reload", handlers.ReloadConfig(cfgManager))
 
 	// 开发信息端点
 	if envCfg.IsDevelopment() {
