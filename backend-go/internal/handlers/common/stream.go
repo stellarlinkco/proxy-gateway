@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/providers"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
@@ -129,12 +130,15 @@ func ProcessStreamEvents(
 	channelScheduler *scheduler.ChannelScheduler,
 	upstream *config.UpstreamConfig,
 	apiKey string,
+	billingHandler *billing.Handler,
+	billingCtx *billing.RequestContext,
+	model string,
 ) error {
 	for {
 		select {
 		case event, ok := <-eventChan:
 			if !ok {
-				logStreamCompletion(ctx, envCfg, startTime, channelScheduler, upstream, apiKey)
+				logStreamCompletion(ctx, envCfg, startTime, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
 				return nil
 			}
 			ProcessStreamEvent(c, w, flusher, event, ctx, envCfg, requestBody)
@@ -290,7 +294,7 @@ func updateCollectedUsage(collected *CollectedUsageData, usageData CollectedUsag
 }
 
 // logStreamCompletion 记录流完成日志
-func logStreamCompletion(ctx *StreamContext, envCfg *config.EnvConfig, startTime time.Time, channelScheduler *scheduler.ChannelScheduler, upstream *config.UpstreamConfig, apiKey string) {
+func logStreamCompletion(ctx *StreamContext, envCfg *config.EnvConfig, startTime time.Time, channelScheduler *scheduler.ChannelScheduler, upstream *config.UpstreamConfig, apiKey string, billingHandler *billing.Handler, billingCtx *billing.RequestContext, model string) {
 	if envCfg.EnableResponseLogs {
 		log.Printf("[Messages-Stream] 流式响应完成: %dms", time.Since(startTime).Milliseconds())
 	}
@@ -331,6 +335,11 @@ func logStreamCompletion(ctx *StreamContext, envCfg *config.EnvConfig, startTime
 
 	// 记录成功指标
 	channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, apiKey, usage, false)
+
+	// 计费扣费
+	if billingHandler != nil && billingCtx != nil && usage != nil {
+		billingHandler.AfterRequest(billingCtx, model, usage.InputTokens, usage.OutputTokens)
+	}
 }
 
 // logPartialResponse 记录部分响应日志
@@ -381,6 +390,9 @@ func HandleStreamResponse(
 	requestBody []byte,
 	channelScheduler *scheduler.ChannelScheduler,
 	apiKey string,
+	billingHandler *billing.Handler,
+	billingCtx *billing.RequestContext,
+	model string,
 ) {
 	defer resp.Body.Close()
 
@@ -402,7 +414,7 @@ func HandleStreamResponse(
 
 	ctx := NewStreamContext(envCfg)
 	seedSynthesizerFromRequest(ctx, requestBody)
-	ProcessStreamEvents(c, w, flusher, eventChan, errChan, ctx, envCfg, startTime, requestBody, channelScheduler, upstream, apiKey)
+	ProcessStreamEvents(c, w, flusher, eventChan, errChan, ctx, envCfg, startTime, requestBody, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
 }
 
 // ========== Token 检测和修补相关函数 ==========

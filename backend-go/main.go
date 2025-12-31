@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/handlers"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/gemini"
@@ -20,8 +21,10 @@ import (
 	"github.com/BenedictKing/claude-proxy/internal/logger"
 	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
+	"github.com/BenedictKing/claude-proxy/internal/pricing"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/session"
+	"github.com/BenedictKing/claude-proxy/internal/usage"
 	"github.com/BenedictKing/claude-proxy/internal/warmup"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -130,6 +133,31 @@ func main() {
 	log.Printf("[Scheduler-Init] 多渠道调度器已初始化 (失败率阈值: %.0f%%, 滑动窗口: %d)",
 		messagesMetricsManager.GetFailureThreshold()*100, messagesMetricsManager.GetWindowSize())
 
+	// 初始化计费相关组件
+	var billingClient *billing.Client
+	var billingHandler *billing.Handler
+	var pricingService *pricing.Service
+	var usageStore *usage.Store
+
+	if envCfg.IsBillingEnabled() {
+		billingClient = billing.NewClient(envCfg.SweAgentBillingURL)
+		log.Printf("[Billing-Init] 计费客户端已初始化: %s", envCfg.SweAgentBillingURL)
+
+		// 解析价格表更新间隔
+		pricingInterval, err := time.ParseDuration(envCfg.PricingUpdateInterval)
+		if err != nil {
+			pricingInterval = 24 * time.Hour
+		}
+		pricingService = pricing.NewService(pricingInterval)
+		log.Printf("[Pricing-Init] 价格表服务已初始化 (更新间隔: %s)", pricingInterval)
+
+		usageStore = usage.NewStore(10000)
+		log.Printf("[Usage-Init] 使用量存储已初始化")
+
+		billingHandler = billing.NewHandler(billingClient, pricingService, usageStore, envCfg.PreAuthAmountCents)
+		log.Printf("[Billing-Init] 计费处理器已初始化 (预授权: %d cents)", envCfg.PreAuthAmountCents)
+	}
+
 	// 设置 Gin 模式
 	if envCfg.IsProduction() {
 		gin.SetMode(gin.ReleaseMode)
@@ -229,7 +257,7 @@ func main() {
 	}
 
 	// 代理端点 - Messages API
-	r.POST("/v1/messages", messages.Handler(envCfg, cfgManager, channelScheduler))
+	r.POST("/v1/messages", messages.Handler(envCfg, cfgManager, channelScheduler, billingClient, billingHandler))
 	r.POST("/v1/messages/count_tokens", messages.CountTokensHandler(envCfg, cfgManager, channelScheduler))
 
 	// 代理端点 - Models API（转发到上游）
@@ -237,7 +265,7 @@ func main() {
 	r.GET("/v1/models/:model", messages.ModelsDetailHandler(envCfg, cfgManager, channelScheduler))
 
 	// 代理端点 - Responses API
-	r.POST("/v1/responses", responses.Handler(envCfg, cfgManager, sessionManager, channelScheduler))
+	r.POST("/v1/responses", responses.Handler(envCfg, cfgManager, sessionManager, channelScheduler, billingClient, billingHandler))
 	r.POST("/v1/responses/compact", responses.CompactHandler(envCfg, cfgManager, sessionManager, channelScheduler))
 
 	// 代理端点 - Gemini API (原生协议)
@@ -283,6 +311,12 @@ func main() {
 	fmt.Printf("[Server-Info] Gemini API: POST /v1beta/models/{model}:streamGenerateContent\n")
 	fmt.Printf("[Server-Info] 健康检查: GET /health\n")
 	fmt.Printf("[Server-Info] 环境: %s\n", envCfg.Env)
+	// 计费模式提示
+	if envCfg.IsBillingEnabled() {
+		fmt.Printf("[Server-Info] 计费模式: 已启用 (swe-agent: %s)\n", envCfg.SweAgentBillingURL)
+	} else {
+		fmt.Printf("[Server-Info] 计费模式: 未启用 (使用单用户模式)\n")
+	}
 	// 检查是否使用默认密码，给予提示
 	if envCfg.ProxyAccessKey == "your-proxy-access-key" {
 		fmt.Printf("[Server-Warn] 访问密钥: your-proxy-access-key (默认值，建议通过 .env 文件修改)\n")
@@ -328,6 +362,12 @@ func main() {
 			} else {
 				log.Println("[Metrics-Shutdown] 指标存储已安全关闭")
 			}
+		}
+
+		// 关闭价格表服务
+		if pricingService != nil {
+			pricingService.Stop()
+			log.Println("[Pricing-Shutdown] 价格表服务已关闭")
 		}
 
 		close(shutdownDone)
