@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/gin-gonic/gin"
 )
@@ -155,5 +156,50 @@ func ProxyAuthMiddleware(envCfg *config.EnvConfig) gin.HandlerFunc {
 		}
 
 		c.Next()
+	}
+}
+
+// BillingAuthMiddleware 计费模式认证中间件
+// 支持双模式：计费模式（验证 swe-agent API Key）+ 旧单用户模式回退
+func BillingAuthMiddleware(envCfg *config.EnvConfig, billingClient *billing.Client) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providedKey := getAPIKey(c)
+
+		if providedKey == "" {
+			c.JSON(401, gin.H{"error": "Missing API key"})
+			c.Abort()
+			return
+		}
+
+		// 计费模式：验证 swe-agent API Key
+		if envCfg.IsBillingEnabled() && billingClient != nil {
+			balance, err := billingClient.ValidateAPIKey(providedKey)
+			if err == nil {
+				// 验证成功，存储用户信息到 context
+				c.Set("billing_enabled", true)
+				c.Set("api_key", providedKey)
+				c.Set("balance_cents", balance.BalanceCents)
+				c.Next()
+				return
+			}
+			// 验证失败，尝试回退到旧模式
+			if envCfg.ShouldLog("debug") {
+				log.Printf("[Auth-Billing] swe-agent 验证失败: %v, 尝试旧模式", err)
+			}
+		}
+
+		// 旧单用户模式回退
+		if providedKey == envCfg.ProxyAccessKey {
+			c.Set("billing_enabled", false)
+			c.Set("api_key", providedKey)
+			c.Next()
+			return
+		}
+
+		if envCfg.ShouldLog("warn") {
+			log.Printf("[Auth-Failed] 认证失败 - IP: %s", c.ClientIP())
+		}
+		c.JSON(401, gin.H{"error": "Invalid API key"})
+		c.Abort()
 	}
 }

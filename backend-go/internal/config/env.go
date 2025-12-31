@@ -37,6 +37,10 @@ type EnvConfig struct {
 	LogMaxAge     int  // 保留的旧日志文件最大天数
 	LogCompress   bool // 是否压缩旧日志文件
 	LogToConsole  bool // 是否同时输出到控制台
+	// 计费配置
+	SweAgentBillingURL   string // swe-agent 计费服务 URL
+	PreAuthAmountCents   int64  // 预授权金额 (cents)
+	PricingUpdateInterval string // 价格表更新间隔
 }
 
 // NewEnvConfig 创建环境配置
@@ -79,6 +83,10 @@ func NewEnvConfig() *EnvConfig {
 		LogMaxAge:     getEnvAsInt("LOG_MAX_AGE", 30),     // 默认保留 30 天
 		LogCompress:   getEnv("LOG_COMPRESS", "true") != "false",
 		LogToConsole:  getEnv("LOG_TO_CONSOLE", "true") != "false",
+		// 计费配置
+		SweAgentBillingURL:    getEnv("SWE_AGENT_BILLING_URL", ""),
+		PreAuthAmountCents:    getEnvAsInt64("PRE_AUTH_AMOUNT_CENTS", 500), // 默认 $5.00
+		PricingUpdateInterval: getEnv("PRICING_UPDATE_INTERVAL", "24h"),
 	}
 }
 
@@ -90,6 +98,11 @@ func (c *EnvConfig) IsDevelopment() bool {
 // IsProduction 是否为生产环境
 func (c *EnvConfig) IsProduction() bool {
 	return c.Env == "production"
+}
+
+// IsBillingEnabled 是否启用计费模式
+func (c *EnvConfig) IsBillingEnabled() bool {
+	return c.SweAgentBillingURL != ""
 }
 
 // ShouldLog 是否应该记录日志

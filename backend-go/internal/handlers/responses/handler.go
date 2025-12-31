@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/converters"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
@@ -31,15 +32,42 @@ func Handler(
 	cfgManager *config.ConfigManager,
 	sessionManager *session.SessionManager,
 	channelScheduler *scheduler.ChannelScheduler,
+	billingClient *billing.Client,
+	billingHandler *billing.Handler,
 ) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
-		// 先进行认证
-		middleware.ProxyAuthMiddleware(envCfg)(c)
+		// 认证：计费模式使用 BillingAuthMiddleware，否则使用 ProxyAuthMiddleware
+		if envCfg.IsBillingEnabled() && billingClient != nil {
+			middleware.BillingAuthMiddleware(envCfg, billingClient)(c)
+		} else {
+			middleware.ProxyAuthMiddleware(envCfg)(c)
+		}
 		if c.IsAborted() {
 			return
 		}
 
 		startTime := time.Now()
+
+		// 计费预授权
+		var billingCtx *billing.RequestContext
+		if billingHandler != nil {
+			var err error
+			billingCtx, err = billingHandler.BeforeRequest(c)
+			if err != nil {
+				if err == billing.ErrInsufficientBalance {
+					c.JSON(402, gin.H{"error": "insufficient_balance", "message": "余额不足"})
+				} else {
+					c.JSON(500, gin.H{"error": "billing_error", "message": err.Error()})
+				}
+				return
+			}
+		}
+		// 确保异常时释放预授权
+		defer func() {
+			if billingCtx != nil && !billingCtx.Charged {
+				billingHandler.Release(billingCtx)
+			}
+		}()
 
 		// 读取原始请求体
 		maxBodySize := envCfg.MaxRequestBodySize
@@ -64,9 +92,9 @@ func Handler(
 		isMultiChannel := channelScheduler.IsMultiChannelMode(true) // true = isResponses
 
 		if isMultiChannel {
-			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, sessionManager, bodyBytes, responsesReq, userID, startTime)
+			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, sessionManager, bodyBytes, responsesReq, userID, startTime, billingHandler, billingCtx)
 		} else {
-			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, sessionManager, bodyBytes, responsesReq, startTime)
+			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, sessionManager, bodyBytes, responsesReq, startTime, billingHandler, billingCtx)
 		}
 	})
 }
@@ -82,6 +110,8 @@ func handleMultiChannel(
 	responsesReq types.ResponsesRequest,
 	userID string,
 	startTime time.Time,
+	billingHandler *billing.Handler,
+	billingCtx *billing.RequestContext,
 ) {
 	failedChannels := make(map[int]bool)
 	var lastError error
@@ -104,7 +134,7 @@ func handleMultiChannel(
 				channelIndex, upstream.Name, selection.Reason, channelAttempt+1, maxChannelAttempts)
 		}
 
-		success, successKey, successBaseURLIdx, failoverErr, usage := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, sessionManager, upstream, channelIndex, bodyBytes, responsesReq, startTime)
+		success, successKey, successBaseURLIdx, failoverErr, usage := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, sessionManager, upstream, channelIndex, bodyBytes, responsesReq, startTime, billingHandler, billingCtx)
 
 		if success {
 			if successKey != "" {
@@ -141,6 +171,8 @@ func tryChannelWithAllKeys(
 	bodyBytes []byte,
 	responsesReq types.ResponsesRequest,
 	startTime time.Time,
+	billingHandler *billing.Handler,
+	billingCtx *billing.RequestContext,
 ) (bool, string, int, *common.FailoverError, *types.Usage) {
 	if len(upstream.APIKeys) == 0 {
 		return false, "", 0, nil, nil
@@ -274,6 +306,8 @@ func handleSingleChannel(
 	bodyBytes []byte,
 	responsesReq types.ResponsesRequest,
 	startTime time.Time,
+	billingHandler *billing.Handler,
+	billingCtx *billing.RequestContext,
 ) {
 	upstream, err := cfgManager.GetCurrentResponsesUpstream()
 	if err != nil {
