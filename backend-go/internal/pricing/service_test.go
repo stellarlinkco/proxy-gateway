@@ -87,8 +87,9 @@ func TestService_getOrFuzzyMatch(t *testing.T) {
 	}{
 		{"exact match", "claude-3-5-sonnet-20241022", true},
 		{"with provider prefix", "claude-3-opus", true},
-		{"fuzzy match", "sonnet", true},
+		{"fuzzy match removed", "sonnet", false}, // 模糊匹配已移除，避免非确定性
 		{"no match", "nonexistent-model-xyz", false},
+		{"empty model", "", false}, // 空 model 应返回 nil
 	}
 
 	for _, tt := range tests {

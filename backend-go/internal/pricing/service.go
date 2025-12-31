@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -110,6 +109,11 @@ func (s *Service) Calculate(model string, inputTokens, outputTokens int) int64 {
 
 // getOrFuzzyMatch 精确匹配或模糊匹配模型
 func (s *Service) getOrFuzzyMatch(model string) *ModelPricing {
+	// 拒绝空 model，避免匹配到任意 key
+	if model == "" {
+		return nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -126,13 +130,8 @@ func (s *Service) getOrFuzzyMatch(model string) *ModelPricing {
 		}
 	}
 
-	// 模糊匹配：查找包含模型名的 key
-	modelLower := strings.ToLower(model)
-	for key, p := range s.models {
-		if strings.Contains(strings.ToLower(key), modelLower) {
-			return p
-		}
-	}
+	// 模糊匹配已移除：map 迭代顺序不确定，可能导致同一 model 匹配到不同价格
+	// 如需模糊匹配，应使用排序后的 key 列表并选择最长匹配
 
 	return nil
 }

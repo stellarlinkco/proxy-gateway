@@ -45,7 +45,8 @@ func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channel
 				if err == billing.ErrInsufficientBalance {
 					c.JSON(402, gin.H{"error": "insufficient_balance", "message": "余额不足"})
 				} else {
-					c.JSON(500, gin.H{"error": "billing_error", "message": err.Error()})
+					log.Printf("[Billing-Error] 预授权失败: %v", err)
+					c.JSON(500, gin.H{"error": "billing_error", "message": "计费服务暂时不可用"})
 				}
 				return
 			}

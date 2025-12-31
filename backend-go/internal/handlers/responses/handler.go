@@ -57,7 +57,8 @@ func Handler(
 				if err == billing.ErrInsufficientBalance {
 					c.JSON(402, gin.H{"error": "insufficient_balance", "message": "余额不足"})
 				} else {
-					c.JSON(500, gin.H{"error": "billing_error", "message": err.Error()})
+					log.Printf("[Billing-Error] 预授权失败: %v", err)
+					c.JSON(500, gin.H{"error": "billing_error", "message": "计费服务暂时不可用"})
 				}
 				return
 			}
@@ -285,6 +286,10 @@ func tryChannelWithAllKeys(
 			channelScheduler.MarkURLSuccess(channelIndex, currentBaseURL)
 
 			usage := handleSuccess(c, resp, provider, upstream.ServiceType, envCfg, sessionManager, startTime, &responsesReq, bodyBytes)
+			// 计费扣费
+			if billingHandler != nil && billingCtx != nil && usage != nil {
+				billingHandler.AfterRequest(billingCtx, responsesReq.Model, usage.InputTokens, usage.OutputTokens)
+			}
 			return true, apiKey, originalIdx, nil, usage
 		}
 		// 当前 BaseURL 的所有 Key 都失败，记录并尝试下一个 BaseURL
@@ -468,6 +473,10 @@ func handleSingleChannel(
 
 			usage := handleSuccess(c, resp, provider, upstream.ServiceType, envCfg, sessionManager, startTime, &responsesReq, bodyBytes)
 			channelScheduler.RecordSuccessWithUsage(currentBaseURL, apiKey, usage, true)
+			// 计费扣费
+			if billingHandler != nil && billingCtx != nil && usage != nil {
+				billingHandler.AfterRequest(billingCtx, responsesReq.Model, usage.InputTokens, usage.OutputTokens)
+			}
 			return
 		}
 	}
