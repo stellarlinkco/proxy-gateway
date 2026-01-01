@@ -98,10 +98,10 @@ func (c *Client) PreAuthorize(apiKey, requestID string, amountCents int64) error
 // Charge 扣费
 func (c *Client) Charge(apiKey, requestID string, preAuthCents, actualCents int64, description string) error {
 	payload := map[string]interface{}{
-		"request_id":     requestID,
-		"preauth_cents":  preAuthCents,
-		"actual_cents":   actualCents,
-		"description":    description,
+		"request_id":    requestID,
+		"preauth_cents": preAuthCents,
+		"actual_cents":  actualCents,
+		"description":   description,
 	}
 	body, _ := json.Marshal(payload)
 

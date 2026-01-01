@@ -70,6 +70,12 @@ func (h *Handler) AfterRequest(ctx *RequestContext, model string, inputTokens, o
 		return
 	}
 
+	// 防御性检查：确保依赖项已初始化
+	if h.pricingService == nil || h.usageStore == nil || h.client == nil {
+		log.Printf("[Billing-Error] 计费处理器依赖项未初始化")
+		return
+	}
+
 	// 计算实际成本
 	actualCents := h.pricingService.Calculate(model, inputTokens, outputTokens)
 
