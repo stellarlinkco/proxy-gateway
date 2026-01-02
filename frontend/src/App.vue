@@ -124,6 +124,35 @@
         </template>
       </div>
 
+      <!-- 页面入口：请求监控 -->
+      <v-tooltip location="bottom" :open-delay="200">
+        <template #activator="{ props }">
+          <v-btn
+            v-bind="props"
+            :variant="isMonitorPage ? 'elevated' : 'tonal'"
+            size="small"
+            class="header-btn d-none d-sm-flex"
+            color="primary"
+            @click="toggleMonitorPage"
+          >
+            <v-icon start size="18">{{ isMonitorPage ? 'mdi-view-dashboard' : 'mdi-pulse' }}</v-icon>
+            {{ isMonitorPage ? '返回概览' : '请求监控' }}
+          </v-btn>
+        </template>
+        <span>{{ isMonitorPage ? '返回概览' : '打开请求监控' }}</span>
+      </v-tooltip>
+
+      <v-btn
+        icon
+        variant="text"
+        size="small"
+        class="header-btn d-flex d-sm-none"
+        :title="isMonitorPage ? '返回概览' : '请求监控'"
+        @click="toggleMonitorPage"
+      >
+        <v-icon size="20">{{ isMonitorPage ? 'mdi-view-dashboard' : 'mdi-pulse' }}</v-icon>
+      </v-btn>
+
       <!-- 暗色模式切换 -->
       <v-btn icon variant="text" size="small" class="header-btn" @click="toggleDarkMode">
         <v-icon size="20">{{
@@ -148,6 +177,8 @@
     <!-- 主要内容 -->
     <v-main>
       <v-container fluid class="pa-4 pa-md-6">
+        <RequestMonitorView v-if="isMonitorPage" v-model:apiType="activeTab" />
+        <template v-else>
         <!-- 全局统计顶部可折叠卡片（根据当前 Tab 显示对应统计） -->
         <v-card class="mb-4 global-stats-panel" v-if="isAuthenticated">
           <div
@@ -302,10 +333,11 @@
           <div class="text-subtitle-1 text-medium-emphasis mb-8">
             还没有配置任何API渠道，请添加第一个渠道来开始使用代理服务
           </div>
-          <v-btn color="primary" size="x-large" @click="openAddChannelModal" prepend-icon="mdi-plus" variant="elevated">
-            添加第一个渠道
-          </v-btn>
-        </v-card>
+	          <v-btn color="primary" size="x-large" @click="openAddChannelModal" prepend-icon="mdi-plus" variant="elevated">
+	            添加第一个渠道
+	          </v-btn>
+	        </v-card>
+        </template>
       </v-container>
     </v-main>
 
@@ -370,12 +402,32 @@ import AddChannelModal from './components/AddChannelModal.vue'
 import ChannelOrchestration from './components/ChannelOrchestration.vue'
 import GlobalStatsChart from './components/GlobalStatsChart.vue'
 import { useAppTheme } from './composables/useTheme'
+import RequestMonitorView from './views/RequestMonitorView.vue'
 
 // Vuetify主题
 const theme = useTheme()
 
 // 应用主题系统
 const { init: initTheme } = useAppTheme()
+
+// 轻量级页面路由：只需要 / 与 /monitor 两页，没必要引入 vue-router
+const currentPath = ref(window.location.pathname)
+const isMonitorPage = computed(() => currentPath.value === '/monitor' || currentPath.value.startsWith('/monitor/'))
+
+function syncPathFromLocation() {
+  currentPath.value = window.location.pathname
+}
+
+function navigateTo(path: string) {
+  if (window.location.pathname === path) return
+  window.history.pushState({}, '', path)
+  syncPathFromLocation()
+  window.scrollTo({ top: 0 })
+}
+
+function toggleMonitorPage() {
+  navigateTo(isMonitorPage.value ? '/' : '/monitor')
+}
 
 // 渠道编排组件引用
 const channelOrchestrationRef = ref<InstanceType<typeof ChannelOrchestration> | null>(null)
@@ -1043,6 +1095,7 @@ const handleVersionClick = () => {
 
 // 初始化
 onMounted(async () => {
+  window.addEventListener('popstate', syncPathFromLocation)
   // 初始化复古像素主题
   document.documentElement.dataset.theme = 'retro'
   initTheme()
@@ -1188,6 +1241,7 @@ watch(isAuthenticated, newValue => {
 
 // 在组件卸载时清除定时器
 onUnmounted(() => {
+  window.removeEventListener('popstate', syncPathFromLocation)
   if (autoRefreshTimer) {
     clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
