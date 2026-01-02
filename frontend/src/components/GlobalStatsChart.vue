@@ -28,18 +28,10 @@
 
       <!-- View switcher -->
       <v-btn-toggle v-model="selectedView" mandatory density="compact" variant="outlined" divided :disabled="isLoading">
-        <v-btn value="traffic" size="x-small">
-          <v-icon size="small" class="mr-1">mdi-chart-line</v-icon>
-          流量
-        </v-btn>
-        <v-btn value="tokens" size="x-small">
-          <v-icon size="small" class="mr-1">mdi-chart-areaspline</v-icon>
-          Token
-        </v-btn>
-        <v-btn value="cache" size="x-small">
-          <v-icon size="small" class="mr-1">mdi-database</v-icon>
-          Cache
-        </v-btn>
+        <v-btn value="traffic" size="x-small">流量</v-btn>
+        <v-btn value="tokens" size="x-small">Token</v-btn>
+        <v-btn value="cache" size="x-small">Cache</v-btn>
+        <v-btn value="cost" size="x-small">Cost</v-btn>
       </v-btn-toggle>
     </div>
 
@@ -56,12 +48,12 @@
         </div>
       </div>
       <div class="summary-card">
-        <div class="summary-label">{{ selectedView === 'cache' ? 'Cache 创建' : '输入 Token' }}</div>
-        <div class="summary-value">{{ formatNumber(selectedView === 'cache' ? summary.totalCacheCreationTokens : summary.totalInputTokens) }}</div>
+        <div class="summary-label">{{ selectedView === 'cache' ? 'Cache 创建' : selectedView === 'cost' ? '总消耗' : '输入 Token' }}</div>
+        <div class="summary-value">{{ selectedView === 'cache' ? formatNumber(summary.totalCacheCreationTokens) : selectedView === 'cost' ? formatCost(summary.totalCostCents) : formatNumber(summary.totalInputTokens) }}</div>
       </div>
       <div class="summary-card">
-        <div class="summary-label">{{ selectedView === 'cache' ? 'Cache 读取' : '输出 Token' }}</div>
-        <div class="summary-value">{{ formatNumber(selectedView === 'cache' ? summary.totalCacheReadTokens : summary.totalOutputTokens) }}</div>
+        <div class="summary-label">{{ selectedView === 'cache' ? 'Cache 读取' : selectedView === 'cost' ? '平均成本' : '输出 Token' }}</div>
+        <div class="summary-value">{{ selectedView === 'cache' ? formatNumber(summary.totalCacheReadTokens) : selectedView === 'cost' ? formatCost(summary.totalRequests > 0 ? Math.round(summary.totalCostCents / summary.totalRequests) : 0) + '/req' : formatNumber(summary.totalOutputTokens) }}</div>
       </div>
     </div>
 
@@ -74,6 +66,9 @@
       <template v-if="selectedView === 'cache'">
         <span><strong>{{ formatNumber(summary.totalCacheCreationTokens) }}</strong> 创建</span>
         <span><strong>{{ formatNumber(summary.totalCacheReadTokens) }}</strong> 读取</span>
+      </template>
+      <template v-else-if="selectedView === 'cost'">
+        <span><strong>{{ formatCost(summary.totalCostCents) }}</strong> 总消耗</span>
       </template>
       <template v-else>
         <span><strong>{{ formatNumber(summary.totalInputTokens) }}</strong> 输入</span>
@@ -123,7 +118,7 @@ const props = withDefaults(defineProps<{
 })
 
 // Types
-type ViewMode = 'traffic' | 'tokens' | 'cache'
+type ViewMode = 'traffic' | 'tokens' | 'cache' | 'cost'
 type Duration = '1h' | '6h' | '24h' | '7d' | '30d' | 'today'
 
 // LocalStorage keys for preferences (per apiType)
@@ -134,7 +129,7 @@ const loadSavedPreferences = (apiType: string) => {
   const savedView = localStorage.getItem(getStorageKey(apiType, 'viewMode')) as ViewMode | null
   const savedDuration = localStorage.getItem(getStorageKey(apiType, 'duration')) as Duration | null
   return {
-    view: savedView && ['traffic', 'tokens', 'cache'].includes(savedView) ? savedView : 'traffic',
+    view: savedView && ['traffic', 'tokens', 'cache', 'cost'].includes(savedView) ? savedView : 'traffic',
     duration: savedDuration && ['1h', '6h', '24h', '7d', '30d', 'today'].includes(savedDuration) ? savedDuration : '6h'
   }
 }
@@ -209,6 +204,9 @@ const chartColors = {
   cache: {
     creation: '#06b6d4',   // Cyan for cache creation
     read: '#22c55e'        // Green for cache read
+  },
+  cost: {
+    total: '#f59e0b'       // Amber for cost
   }
 }
 
@@ -217,6 +215,14 @@ const formatNumber = (num: number): string => {
   if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M'
   if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
   return num.toFixed(0)
+}
+
+// Format cost (cents to dollars)
+const formatCost = (cents: number): string => {
+  const dollars = cents / 100
+  if (dollars >= 1000) return '$' + (dollars / 1000).toFixed(2) + 'K'
+  if (dollars >= 1) return '$' + dollars.toFixed(2)
+  return '$' + dollars.toFixed(4)
 }
 
 // Chart options
@@ -243,7 +249,9 @@ const chartOptions = computed(() => {
       ? [chartColors.traffic.primary, chartColors.traffic.success]
       : mode === 'tokens'
         ? [chartColors.tokens.input, chartColors.tokens.output]
-        : [chartColors.cache.creation, chartColors.cache.read],
+        : mode === 'cost'
+          ? [chartColors.cost.total]
+          : [chartColors.cache.creation, chartColors.cache.read],
     fill: {
       type: 'gradient',
       gradient: {
@@ -259,7 +267,7 @@ const chartOptions = computed(() => {
     stroke: {
       curve: 'smooth',
       width: 2,
-      dashArray: mode === 'tokens' || mode === 'cache' ? [0, 5] : [0, 0]
+      dashArray: mode === 'tokens' || mode === 'cache' ? [0, 5] : 0
     },
     grid: {
       borderColor: isDark.value ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)',
@@ -295,13 +303,21 @@ const chartOptions = computed(() => {
             min: 0
           }
         ]
-      : {
-          labels: {
-            formatter: (val: number) => Math.round(val).toString(),
-            style: { fontSize: '11px' }
+      : mode === 'cost'
+        ? {
+            labels: {
+              formatter: (val: number) => formatCost(val),
+              style: { fontSize: '11px' }
+            },
+            min: 0
+          }
+        : {
+            labels: {
+              formatter: (val: number) => Math.round(val).toString(),
+              style: { fontSize: '11px' }
+            },
+            min: 0
           },
-          min: 0
-        },
     tooltip: {
       x: {
         format: 'MM-dd HH:mm'
@@ -309,7 +325,9 @@ const chartOptions = computed(() => {
       y: {
         formatter: (val: number) => mode === 'traffic'
           ? `${Math.round(val)} 请求`
-          : formatNumber(val)
+          : mode === 'cost'
+            ? formatCost(val)
+            : formatNumber(val)
       }
     },
     legend: {
@@ -360,6 +378,16 @@ const chartSeries = computed(() => {
         data: dataPoints.map(dp => ({
           x: new Date(dp.timestamp).getTime(),
           y: dp.outputTokens
+        }))
+      }
+    ]
+  } else if (mode === 'cost') {
+    return [
+      {
+        name: '消耗金额',
+        data: dataPoints.map(dp => ({
+          x: new Date(dp.timestamp).getTime(),
+          y: dp.costCents
         }))
       }
     ]

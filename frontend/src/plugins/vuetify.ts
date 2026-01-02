@@ -98,6 +98,10 @@ import {
   mdiChartLine,
   mdiCodeBraces,
   mdiDatabase,
+  mdiCurrencyUsd,
+  mdiPulse,
+  mdiFormatListBulleted,
+  mdiViewDashboard,
 } from '@mdi/js'
 
 // 图标名称到 SVG path 的映射 (使用 kebab-case)
@@ -202,6 +206,9 @@ const iconMap: Record<string, string> = {
   'server-network': mdiServerNetwork,
   'pin': mdiPin,
   'pin-outline': mdiPinOutline,
+  'pulse': mdiPulse,
+  'format-list-bulleted': mdiFormatListBulleted,
+  'view-dashboard': mdiViewDashboard,
   'lightning-bolt': mdiLightningBolt,
   'form-textbox': mdiFormTextbox,
   'clock-outline': mdiClockOutline,
@@ -245,6 +252,7 @@ const iconMap: Record<string, string> = {
   'chart-line': mdiChartLine,
   'code-braces': mdiCodeBraces,
   'database': mdiDatabase,
+  'currency-usd': mdiCurrencyUsd,
 }
 
 // 自定义 SVG iconset - 处理 mdi-xxx 字符串格式
