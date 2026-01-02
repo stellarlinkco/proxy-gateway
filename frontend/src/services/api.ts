@@ -142,6 +142,7 @@ export interface KeyHistoryDataPoint {
   outputTokens: number
   cacheCreationTokens: number
   cacheReadTokens: number
+  costCents: number
 }
 
 // 单个 Key 的历史数据
@@ -172,6 +173,7 @@ export interface GlobalHistoryDataPoint {
   outputTokens: number
   cacheCreationTokens: number
   cacheReadTokens: number
+  costCents: number
 }
 
 // 全局统计汇总
@@ -183,6 +185,7 @@ export interface GlobalStatsSummary {
   totalOutputTokens: number
   totalCacheCreationTokens: number
   totalCacheReadTokens: number
+  totalCostCents: number
   avgSuccessRate: number
   duration: string
 }
@@ -192,6 +195,57 @@ export interface GlobalStatsHistoryResponse {
   dataPoints: GlobalHistoryDataPoint[]
   summary: GlobalStatsSummary
   warning?: string
+}
+
+// ============== 请求日志与实时监控类型 ==============
+
+export type ApiType = 'messages' | 'responses' | 'gemini'
+
+// 请求日志记录
+export interface RequestLogRecord {
+  id: number
+  requestId: string
+  channelIndex: number
+  channelName: string
+  keyMask: string
+  timestamp: string
+  durationMs: number
+  statusCode: number
+  success: boolean
+  model: string
+  inputTokens: number
+  outputTokens: number
+  cacheCreationTokens: number
+  cacheReadTokens: number
+  costCents: number
+  errorMessage?: string
+  apiType: string
+}
+
+// 请求日志响应
+export interface RequestLogsResponse {
+  logs: RequestLogRecord[]
+  total: number
+  limit: number
+  offset: number
+}
+
+// 实时请求
+export interface LiveRequest {
+  requestId: string
+  channelIndex: number
+  channelName: string
+  keyMask: string
+  model: string
+  startTime: string
+  apiType: string
+  isStreaming: boolean
+}
+
+// 实时请求响应
+export interface LiveRequestsResponse {
+  requests: LiveRequest[]
+  count: number
 }
 
 class ApiService {
@@ -631,6 +685,18 @@ class ApiService {
       method: 'PUT',
       body: JSON.stringify({ strategy })
     })
+  }
+
+  // ============== 请求日志与实时监控 API ==============
+
+  // 获取请求日志
+  async getRequestLogs(apiType: ApiType, limit = 50, offset = 0): Promise<RequestLogsResponse> {
+    return this.request(`/${apiType}/logs?limit=${limit}&offset=${offset}`)
+  }
+
+  // 获取实时请求
+  async getLiveRequests(apiType: ApiType): Promise<LiveRequestsResponse> {
+    return this.request(`/${apiType}/live`)
   }
 
   // ============== Gemini 历史指标 API ==============
