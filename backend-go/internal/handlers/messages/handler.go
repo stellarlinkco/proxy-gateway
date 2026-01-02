@@ -12,79 +12,226 @@ import (
 	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
+	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
+	"github.com/BenedictKing/claude-proxy/internal/monitor"
 	"github.com/BenedictKing/claude-proxy/internal/providers"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/types"
 	"github.com/BenedictKing/claude-proxy/internal/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
-// Handler Messages API 代理处理器
-// 支持多渠道调度：当配置多个渠道时自动启用
-func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channelScheduler *scheduler.ChannelScheduler, billingClient *billing.Client, billingHandler *billing.Handler) gin.HandlerFunc {
-	return gin.HandlerFunc(func(c *gin.Context) {
-		// 认证：计费模式使用 BillingAuthMiddleware，否则使用 ProxyAuthMiddleware
-		if envCfg.IsBillingEnabled() && billingClient != nil {
-			middleware.BillingAuthMiddleware(envCfg, billingClient)(c)
-		} else {
-			middleware.ProxyAuthMiddleware(envCfg)(c)
-		}
-		if c.IsAborted() {
-			return
-		}
+type requestLogContext struct {
+	requestID string
+	startTime time.Time
+	apiType   string
 
-		startTime := time.Now()
+	model       string
+	isStreaming bool
 
-		// 计费预授权
-		var billingCtx *billing.RequestContext
-		if billingHandler != nil {
-			var err error
-			billingCtx, err = billingHandler.BeforeRequest(c)
-			if err != nil {
-				if err == billing.ErrInsufficientBalance {
-					c.JSON(402, gin.H{"error": "insufficient_balance", "message": "余额不足"})
-				} else {
-					log.Printf("[Billing-Error] 预授权失败: %v", err)
-					c.JSON(500, gin.H{"error": "billing_error", "message": "计费服务暂时不可用"})
-				}
-				return
-			}
-		}
-		// 确保异常时释放预授权
-		defer func() {
-			if billingCtx != nil && !billingCtx.Charged {
-				billingHandler.Release(billingCtx)
-			}
-		}()
+	channelIndex int
+	channelName  string
+	apiKey       string
 
-		// 读取请求体
-		bodyBytes, err := common.ReadRequestBody(c, envCfg.MaxRequestBodySize)
-		if err != nil {
-			return
-		}
+	usage     *types.Usage
+	costCents int64
 
-		// 解析请求
-		var claudeReq types.ClaudeRequest
-		if len(bodyBytes) > 0 {
-			_ = json.Unmarshal(bodyBytes, &claudeReq)
-		}
+	success  bool
+	errorMsg string
 
-		// 提取 user_id 用于 Trace 亲和性
-		userID := common.ExtractUserID(bodyBytes)
+	liveRequestManager *monitor.LiveRequestManager
+}
 
-		// 记录原始请求信息（仅在入口处记录一次）
-		common.LogOriginalRequest(c, bodyBytes, envCfg, "Messages")
-
-		// 检查是否为多渠道模式
-		isMultiChannel := channelScheduler.IsMultiChannelMode(false)
-
-		if isMultiChannel {
-			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, userID, startTime, billingHandler, billingCtx)
-		} else {
-			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, startTime, billingHandler, billingCtx)
-		}
+func (r *requestLogContext) updateLive() {
+	if r == nil || r.liveRequestManager == nil {
+		return
+	}
+	r.liveRequestManager.StartRequest(&monitor.LiveRequest{
+		RequestID:    r.requestID,
+		ChannelIndex: r.channelIndex,
+		ChannelName:  r.channelName,
+		KeyMask:      utils.MaskAPIKey(r.apiKey),
+		Model:        r.model,
+		StartTime:    r.startTime,
+		APIType:      r.apiType,
+		IsStreaming:  r.isStreaming,
 	})
+}
+
+func truncateErrorMessage(msg string) string {
+	const maxLen = 1024
+	if len(msg) <= maxLen {
+		return msg
+	}
+	return msg[:maxLen] + "..."
+}
+
+type Handler struct {
+	envCfg           *config.EnvConfig
+	cfgManager       *config.ConfigManager
+	channelScheduler *scheduler.ChannelScheduler
+	billingClient    *billing.Client
+	billingHandler   *billing.Handler
+
+	liveRequestManager *monitor.LiveRequestManager
+	sqliteStore        *metrics.SQLiteStore
+}
+
+func NewHandler(
+	envCfg *config.EnvConfig,
+	cfgManager *config.ConfigManager,
+	channelScheduler *scheduler.ChannelScheduler,
+	billingClient *billing.Client,
+	billingHandler *billing.Handler,
+	liveRequestManager *monitor.LiveRequestManager,
+	sqliteStore *metrics.SQLiteStore,
+) gin.HandlerFunc {
+	h := &Handler{
+		envCfg:             envCfg,
+		cfgManager:         cfgManager,
+		channelScheduler:   channelScheduler,
+		billingClient:      billingClient,
+		billingHandler:     billingHandler,
+		liveRequestManager: liveRequestManager,
+		sqliteStore:        sqliteStore,
+	}
+	return h.Handle
+}
+
+// Handle Messages API 代理处理器
+// 支持多渠道调度：当配置多个渠道时自动启用
+func (h *Handler) Handle(c *gin.Context) {
+	envCfg := h.envCfg
+	cfgManager := h.cfgManager
+	channelScheduler := h.channelScheduler
+	billingClient := h.billingClient
+	billingHandler := h.billingHandler
+
+	// 认证：计费模式使用 BillingAuthMiddleware，否则使用 ProxyAuthMiddleware
+	if envCfg.IsBillingEnabled() && billingClient != nil {
+		middleware.BillingAuthMiddleware(envCfg, billingClient)(c)
+	} else {
+		middleware.ProxyAuthMiddleware(envCfg)(c)
+	}
+	if c.IsAborted() {
+		return
+	}
+
+	startTime := time.Now()
+	requestID := uuid.New().String()
+
+	reqCtx := &requestLogContext{
+		requestID:          requestID,
+		startTime:          startTime,
+		apiType:            "messages",
+		liveRequestManager: h.liveRequestManager,
+	}
+
+	if h.liveRequestManager != nil {
+		reqCtx.updateLive()
+		defer h.liveRequestManager.EndRequest(requestID)
+	}
+
+	defer func() {
+		if h.sqliteStore == nil {
+			return
+		}
+
+		statusCode := c.Writer.Status()
+		success := reqCtx.success
+		if !success && statusCode >= 200 && statusCode < 300 && reqCtx.errorMsg == "" {
+			success = true
+		}
+
+		var usage types.Usage
+		if reqCtx.usage != nil {
+			usage = *reqCtx.usage
+		}
+
+		errorMsg := reqCtx.errorMsg
+		if !success && errorMsg == "" && statusCode >= 400 {
+			errorMsg = fmt.Sprintf("http status %d", statusCode)
+		}
+
+		if err := h.sqliteStore.AddRequestLog(metrics.RequestLogRecord{
+			RequestID:           requestID,
+			ChannelIndex:        reqCtx.channelIndex,
+			ChannelName:         reqCtx.channelName,
+			KeyMask:             utils.MaskAPIKey(reqCtx.apiKey),
+			Timestamp:           startTime,
+			DurationMs:          time.Since(startTime).Milliseconds(),
+			StatusCode:          statusCode,
+			Success:             success,
+			Model:               reqCtx.model,
+			InputTokens:         int64(usage.InputTokens),
+			OutputTokens:        int64(usage.OutputTokens),
+			CacheCreationTokens: int64(usage.CacheCreationInputTokens),
+			CacheReadTokens:     int64(usage.CacheReadInputTokens),
+			CostCents:           reqCtx.costCents,
+			ErrorMessage:        truncateErrorMessage(errorMsg),
+			APIType:             "messages",
+		}); err != nil {
+			log.Printf("[Messages-RequestLog] 警告: AddRequestLog 失败: %v", err)
+		}
+	}()
+
+	// 计费预授权
+	var billingCtx *billing.RequestContext
+	if billingHandler != nil {
+		var err error
+		billingCtx, err = billingHandler.BeforeRequest(c)
+		if err != nil {
+			reqCtx.success = false
+			reqCtx.errorMsg = truncateErrorMessage(err.Error())
+			if err == billing.ErrInsufficientBalance {
+				c.JSON(402, gin.H{"error": "insufficient_balance", "message": "余额不足"})
+			} else {
+				log.Printf("[Billing-Error] 预授权失败: %v", err)
+				c.JSON(500, gin.H{"error": "billing_error", "message": "计费服务暂时不可用"})
+			}
+			return
+		}
+	}
+	// 确保异常时释放预授权
+	defer func() {
+		if billingCtx != nil && !billingCtx.Charged {
+			billingHandler.Release(billingCtx)
+		}
+	}()
+
+	// 读取请求体
+	bodyBytes, err := common.ReadRequestBody(c, envCfg.MaxRequestBodySize)
+	if err != nil {
+		reqCtx.success = false
+		reqCtx.errorMsg = truncateErrorMessage(err.Error())
+		return
+	}
+
+	// 解析请求
+	var claudeReq types.ClaudeRequest
+	if len(bodyBytes) > 0 {
+		_ = json.Unmarshal(bodyBytes, &claudeReq)
+	}
+	reqCtx.model = claudeReq.Model
+	reqCtx.isStreaming = claudeReq.Stream
+	reqCtx.updateLive()
+
+	// 提取 user_id 用于 Trace 亲和性
+	userID := common.ExtractUserID(bodyBytes)
+
+	// 记录原始请求信息（仅在入口处记录一次）
+	common.LogOriginalRequest(c, bodyBytes, envCfg, "Messages")
+
+	// 检查是否为多渠道模式
+	isMultiChannel := channelScheduler.IsMultiChannelMode(false)
+
+	if isMultiChannel {
+		handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, userID, startTime, billingHandler, billingCtx, reqCtx)
+	} else {
+		handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, startTime, billingHandler, billingCtx, reqCtx)
+	}
 }
 
 // handleMultiChannel 处理多渠道代理请求
@@ -99,6 +246,7 @@ func handleMultiChannel(
 	startTime time.Time,
 	billingHandler *billing.Handler,
 	billingCtx *billing.RequestContext,
+	reqCtx *requestLogContext,
 ) {
 	failedChannels := make(map[int]bool)
 	var lastError error
@@ -115,13 +263,18 @@ func handleMultiChannel(
 
 		upstream := selection.Upstream
 		channelIndex := selection.ChannelIndex
+		if reqCtx != nil {
+			reqCtx.channelIndex = channelIndex
+			reqCtx.channelName = upstream.Name
+			reqCtx.updateLive()
+		}
 
 		if envCfg.ShouldLog("info") {
 			log.Printf("[Messages-Select] 选择渠道: [%d] %s (原因: %s, 尝试 %d/%d)",
 				channelIndex, upstream.Name, selection.Reason, channelAttempt+1, maxChannelAttempts)
 		}
 
-		success, successKey, successBaseURLIdx, failoverErr := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, upstream, channelIndex, bodyBytes, claudeReq, startTime, billingHandler, billingCtx)
+		success, successKey, successBaseURLIdx, failoverErr := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, upstream, channelIndex, bodyBytes, claudeReq, startTime, billingHandler, billingCtx, reqCtx)
 
 		if success {
 			if successKey != "" {
@@ -142,6 +295,14 @@ func handleMultiChannel(
 	}
 
 	log.Printf("[Messages-Error] 所有渠道都失败了")
+	if reqCtx != nil {
+		reqCtx.success = false
+		if lastError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(lastError.Error())
+		} else if lastFailoverError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(string(lastFailoverError.Body))
+		}
+	}
 	common.HandleAllChannelsFailed(c, cfgManager.GetFuzzyModeEnabled(), lastFailoverError, lastError, "Messages")
 }
 
@@ -159,6 +320,7 @@ func tryChannelWithAllKeys(
 	startTime time.Time,
 	billingHandler *billing.Handler,
 	billingCtx *billing.RequestContext,
+	reqCtx *requestLogContext,
 ) (bool, string, int, *common.FailoverError) {
 	if len(upstream.APIKeys) == 0 {
 		return false, "", 0, nil
@@ -198,6 +360,12 @@ func tryChannelWithAllKeys(
 			apiKey, err := cfgManager.GetNextAPIKey(upstream, failedKeys)
 			if err != nil {
 				break // 当前 BaseURL 没有可用 Key，尝试下一个 BaseURL
+			}
+			if reqCtx != nil {
+				reqCtx.channelIndex = channelIndex
+				reqCtx.channelName = upstream.Name
+				reqCtx.apiKey = apiKey
+				reqCtx.updateLive()
 			}
 
 			// 检查熔断状态
@@ -275,6 +443,10 @@ func tryChannelWithAllKeys(
 
 				// 非 failover 错误，记录失败指标后直接返回
 				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(string(respBodyBytes))
+				}
 				c.Data(resp.StatusCode, "application/json", respBodyBytes)
 				return true, "", 0, nil
 			}
@@ -292,9 +464,17 @@ func tryChannelWithAllKeys(
 			channelScheduler.MarkURLSuccess(channelIndex, currentBaseURL)
 
 			if claudeReq.Stream {
-				common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				if reqCtx != nil {
+					reqCtx.usage = usage
+					reqCtx.costCents = costCents
+					reqCtx.success = streamErr == nil
+					if streamErr != nil {
+						reqCtx.errorMsg = truncateErrorMessage(streamErr.Error())
+					}
+				}
 			} else {
-				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstream, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstream, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
 			}
 			return true, apiKey, originalIdx, nil
 		}
@@ -318,9 +498,14 @@ func handleSingleChannel(
 	startTime time.Time,
 	billingHandler *billing.Handler,
 	billingCtx *billing.RequestContext,
+	reqCtx *requestLogContext,
 ) {
 	upstream, err := cfgManager.GetCurrentUpstream()
 	if err != nil {
+		if reqCtx != nil {
+			reqCtx.success = false
+			reqCtx.errorMsg = "未配置任何渠道"
+		}
 		c.JSON(503, gin.H{
 			"error": "未配置任何渠道，请先在管理界面添加渠道",
 			"code":  "NO_UPSTREAM",
@@ -329,6 +514,13 @@ func handleSingleChannel(
 	}
 
 	if len(upstream.APIKeys) == 0 {
+		if reqCtx != nil {
+			reqCtx.channelIndex = 0
+			reqCtx.channelName = upstream.Name
+			reqCtx.success = false
+			reqCtx.errorMsg = "未配置API密钥"
+			reqCtx.updateLive()
+		}
 		c.JSON(503, gin.H{
 			"error": fmt.Sprintf("当前渠道 \"%s\" 未配置API密钥", upstream.Name),
 			"code":  "NO_API_KEYS",
@@ -338,8 +530,21 @@ func handleSingleChannel(
 
 	provider := providers.GetProvider(upstream.ServiceType)
 	if provider == nil {
+		if reqCtx != nil {
+			reqCtx.channelIndex = 0
+			reqCtx.channelName = upstream.Name
+			reqCtx.success = false
+			reqCtx.errorMsg = "Unsupported service type"
+			reqCtx.updateLive()
+		}
 		c.JSON(400, gin.H{"error": "Unsupported service type"})
 		return
+	}
+
+	if reqCtx != nil {
+		reqCtx.channelIndex = 0
+		reqCtx.channelName = upstream.Name
+		reqCtx.updateLive()
 	}
 
 	metricsManager := channelScheduler.GetMessagesMetricsManager()
@@ -367,6 +572,10 @@ func handleSingleChannel(
 			if err != nil {
 				lastError = err
 				break // 当前 BaseURL 没有可用 Key，尝试下一个 BaseURL
+			}
+			if reqCtx != nil {
+				reqCtx.apiKey = apiKey
+				reqCtx.updateLive()
 			}
 
 			// 检查熔断状态
@@ -470,6 +679,10 @@ func handleSingleChannel(
 					}
 				}
 				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(string(respBodyBytes))
+				}
 				c.Data(resp.StatusCode, "application/json", respBodyBytes)
 				return
 			}
@@ -485,15 +698,31 @@ func handleSingleChannel(
 
 			channelScheduler.RecordSuccess(currentBaseURL, apiKey, false)
 			if claudeReq.Stream {
-				common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				if reqCtx != nil {
+					reqCtx.usage = usage
+					reqCtx.costCents = costCents
+					reqCtx.success = streamErr == nil
+					if streamErr != nil {
+						reqCtx.errorMsg = truncateErrorMessage(streamErr.Error())
+					}
+				}
 			} else {
-				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstream, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstream, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
 			}
 			return
 		}
 	}
 
 	log.Printf("[Messages-Error] 所有API密钥都失败了")
+	if reqCtx != nil {
+		reqCtx.success = false
+		if lastError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(lastError.Error())
+		} else if lastFailoverError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(string(lastFailoverError.Body))
+		}
+	}
 	common.HandleAllKeysFailed(c, cfgManager.GetFuzzyModeEnabled(), lastFailoverError, lastError, "Messages")
 }
 
@@ -511,6 +740,7 @@ func handleNormalResponse(
 	billingHandler *billing.Handler,
 	billingCtx *billing.RequestContext,
 	model string,
+	reqCtx *requestLogContext,
 ) {
 	defer resp.Body.Close()
 
@@ -617,8 +847,20 @@ func handleNormalResponse(
 
 	c.JSON(200, claudeResp)
 
+	// 计算成本
+	var costCents int64
+	if billingHandler != nil && claudeResp.Usage != nil {
+		costCents = billingHandler.CalculateCost(model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens)
+	}
+
 	// 记录成功指标
-	channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, apiKey, claudeResp.Usage, false)
+	channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, apiKey, claudeResp.Usage, false, model, costCents)
+	if reqCtx != nil {
+		reqCtx.usage = claudeResp.Usage
+		reqCtx.costCents = costCents
+		reqCtx.success = true
+		reqCtx.errorMsg = ""
+	}
 
 	// 计费扣费
 	if billingHandler != nil && billingCtx != nil && claudeResp.Usage != nil {

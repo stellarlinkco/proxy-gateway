@@ -14,91 +14,232 @@ import (
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/converters"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
+	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
+	"github.com/BenedictKing/claude-proxy/internal/monitor"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/types"
 	"github.com/BenedictKing/claude-proxy/internal/utils"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
-// Handler Gemini API 代理处理器
-// 支持多渠道调度：当配置多个渠道时自动启用
-func Handler(
+type requestLogContext struct {
+	requestID string
+	startTime time.Time
+	apiType   string
+
+	model       string
+	isStreaming bool
+
+	channelIndex int
+	channelName  string
+	apiKey       string
+
+	usage     *types.Usage
+	costCents int64
+
+	success  bool
+	errorMsg string
+
+	liveRequestManager *monitor.LiveRequestManager
+}
+
+func (r *requestLogContext) updateLive() {
+	if r == nil || r.liveRequestManager == nil {
+		return
+	}
+	r.liveRequestManager.StartRequest(&monitor.LiveRequest{
+		RequestID:    r.requestID,
+		ChannelIndex: r.channelIndex,
+		ChannelName:  r.channelName,
+		KeyMask:      utils.MaskAPIKey(r.apiKey),
+		Model:        r.model,
+		StartTime:    r.startTime,
+		APIType:      r.apiType,
+		IsStreaming:  r.isStreaming,
+	})
+}
+
+func truncateErrorMessage(msg string) string {
+	const maxLen = 1024
+	if len(msg) <= maxLen {
+		return msg
+	}
+	return msg[:maxLen] + "..."
+}
+
+type Handler struct {
+	envCfg           *config.EnvConfig
+	cfgManager       *config.ConfigManager
+	channelScheduler *scheduler.ChannelScheduler
+
+	liveRequestManager *monitor.LiveRequestManager
+	sqliteStore        *metrics.SQLiteStore
+}
+
+func NewHandler(
 	envCfg *config.EnvConfig,
 	cfgManager *config.ConfigManager,
 	channelScheduler *scheduler.ChannelScheduler,
+	liveRequestManager *monitor.LiveRequestManager,
+	sqliteStore *metrics.SQLiteStore,
 ) gin.HandlerFunc {
-	return gin.HandlerFunc(func(c *gin.Context) {
-		// 支持两种认证方式：x-goog-api-key（Gemini 原生）和 x-api-key（通用）
-		apiKey := extractGeminiAPIKey(c)
-		if apiKey == "" {
-			// 使用标准认证中间件
-			middleware.ProxyAuthMiddleware(envCfg)(c)
-			if c.IsAborted() {
-				return
-			}
+	h := &Handler{
+		envCfg:             envCfg,
+		cfgManager:         cfgManager,
+		channelScheduler:   channelScheduler,
+		liveRequestManager: liveRequestManager,
+		sqliteStore:        sqliteStore,
+	}
+	return h.Handle
+}
+
+// Handle Gemini API 代理处理器
+// 支持多渠道调度：当配置多个渠道时自动启用
+func (h *Handler) Handle(c *gin.Context) {
+	envCfg := h.envCfg
+	cfgManager := h.cfgManager
+	channelScheduler := h.channelScheduler
+
+	// 支持两种认证方式：x-goog-api-key（Gemini 原生）和 x-api-key（通用）
+	apiKey := extractGeminiAPIKey(c)
+	if apiKey == "" {
+		// 使用标准认证中间件
+		middleware.ProxyAuthMiddleware(envCfg)(c)
+		if c.IsAborted() {
+			return
 		}
+	}
 
-		startTime := time.Now()
+	startTime := time.Now()
+	requestID := uuid.New().String()
 
-		// 读取原始请求体
-		maxBodySize := envCfg.MaxRequestBodySize
-		bodyBytes, err := common.ReadRequestBody(c, maxBodySize)
-		if err != nil {
+	reqCtx := &requestLogContext{
+		requestID:          requestID,
+		startTime:          startTime,
+		apiType:            "gemini",
+		liveRequestManager: h.liveRequestManager,
+	}
+	if h.liveRequestManager != nil {
+		reqCtx.updateLive()
+		defer h.liveRequestManager.EndRequest(requestID)
+	}
+
+	defer func() {
+		if h.sqliteStore == nil {
 			return
 		}
 
-		// 解析 Gemini 请求
-		var geminiReq types.GeminiRequest
-		if len(bodyBytes) > 0 {
-			if err := json.Unmarshal(bodyBytes, &geminiReq); err != nil {
-				c.JSON(400, types.GeminiError{
-					Error: types.GeminiErrorDetail{
-						Code:    400,
-						Message: fmt.Sprintf("Invalid request body: %v", err),
-						Status:  "INVALID_ARGUMENT",
-					},
-				})
-				return
-			}
+		statusCode := c.Writer.Status()
+		success := reqCtx.success
+		if !success && statusCode >= 200 && statusCode < 300 && reqCtx.errorMsg == "" {
+			success = true
 		}
 
-		// 从 URL 路径提取模型名称
-		// 格式: /v1/models/{model}:generateContent 或 /v1/models/{model}:streamGenerateContent
-		// 使用 *modelAction 通配符捕获整个后缀，如 /gemini-pro:generateContent
-		modelAction := c.Param("modelAction")
-		// 移除前导斜杠（Gin 的 * 通配符会保留前导斜杠）
-		modelAction = strings.TrimPrefix(modelAction, "/")
-		model := extractModelName(modelAction)
-		if model == "" {
+		var usage types.Usage
+		if reqCtx.usage != nil {
+			usage = *reqCtx.usage
+		}
+
+		errorMsg := reqCtx.errorMsg
+		if !success && errorMsg == "" && statusCode >= 400 {
+			errorMsg = fmt.Sprintf("http status %d", statusCode)
+		}
+
+		finalStatusCode := statusCode
+		if success && reqCtx.isStreaming {
+			finalStatusCode = 200
+		}
+
+		if err := h.sqliteStore.AddRequestLog(metrics.RequestLogRecord{
+			RequestID:           requestID,
+			ChannelIndex:        reqCtx.channelIndex,
+			ChannelName:         reqCtx.channelName,
+			KeyMask:             utils.MaskAPIKey(reqCtx.apiKey),
+			Timestamp:           startTime,
+			DurationMs:          time.Since(startTime).Milliseconds(),
+			StatusCode:          finalStatusCode,
+			Success:             success,
+			Model:               reqCtx.model,
+			InputTokens:         int64(usage.InputTokens),
+			OutputTokens:        int64(usage.OutputTokens),
+			CacheCreationTokens: int64(usage.CacheCreationInputTokens),
+			CacheReadTokens:     int64(usage.CacheReadInputTokens),
+			CostCents:           reqCtx.costCents,
+			ErrorMessage:        truncateErrorMessage(errorMsg),
+			APIType:             "gemini",
+		}); err != nil {
+			log.Printf("[Gemini-RequestLog] 警告: AddRequestLog 失败: %v", err)
+		}
+	}()
+
+	// 读取原始请求体
+	maxBodySize := envCfg.MaxRequestBodySize
+	bodyBytes, err := common.ReadRequestBody(c, maxBodySize)
+	if err != nil {
+		reqCtx.success = false
+		reqCtx.errorMsg = truncateErrorMessage(err.Error())
+		return
+	}
+
+	// 解析 Gemini 请求
+	var geminiReq types.GeminiRequest
+	if len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, &geminiReq); err != nil {
+			reqCtx.success = false
+			reqCtx.errorMsg = truncateErrorMessage(err.Error())
 			c.JSON(400, types.GeminiError{
 				Error: types.GeminiErrorDetail{
 					Code:    400,
-					Message: "Model name is required in URL path",
+					Message: fmt.Sprintf("Invalid request body: %v", err),
 					Status:  "INVALID_ARGUMENT",
 				},
 			})
 			return
 		}
+	}
 
-		// 判断是否流式
-		isStream := strings.Contains(c.Request.URL.Path, "streamGenerateContent")
+	// 从 URL 路径提取模型名称
+	// 格式: /v1/models/{model}:generateContent 或 /v1/models/{model}:streamGenerateContent
+	// 使用 *modelAction 通配符捕获整个后缀，如 /gemini-pro:generateContent
+	modelAction := c.Param("modelAction")
+	// 移除前导斜杠（Gin 的 * 通配符会保留前导斜杠）
+	modelAction = strings.TrimPrefix(modelAction, "/")
+	model := extractModelName(modelAction)
+	if model == "" {
+		reqCtx.success = false
+		reqCtx.errorMsg = "model 为空"
+		c.JSON(400, types.GeminiError{
+			Error: types.GeminiErrorDetail{
+				Code:    400,
+				Message: "Model name is required in URL path",
+				Status:  "INVALID_ARGUMENT",
+			},
+		})
+		return
+	}
 
-		// 提取对话标识用于 Trace 亲和性
-		userID := common.ExtractConversationID(c, bodyBytes)
+	// 判断是否流式
+	isStream := strings.Contains(c.Request.URL.Path, "streamGenerateContent")
+	reqCtx.model = model
+	reqCtx.isStreaming = isStream
+	reqCtx.updateLive()
 
-		// 记录原始请求信息
-		common.LogOriginalRequest(c, bodyBytes, envCfg, "Gemini")
+	// 提取对话标识用于 Trace 亲和性
+	userID := common.ExtractConversationID(c, bodyBytes)
 
-		// 检查是否为多渠道模式
-		isMultiChannel := channelScheduler.IsMultiChannelModeGemini()
+	// 记录原始请求信息
+	common.LogOriginalRequest(c, bodyBytes, envCfg, "Gemini")
 
-		if isMultiChannel {
-			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, userID, startTime)
-		} else {
-			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, startTime)
-		}
-	})
+	// 检查是否为多渠道模式
+	isMultiChannel := channelScheduler.IsMultiChannelModeGemini()
+
+	if isMultiChannel {
+		handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, userID, startTime, reqCtx)
+	} else {
+		handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, startTime, reqCtx)
+	}
 }
 
 // extractGeminiAPIKey 从请求中提取 Gemini 风格的 API Key
@@ -140,6 +281,7 @@ func handleMultiChannel(
 	isStream bool,
 	userID string,
 	startTime time.Time,
+	reqCtx *requestLogContext,
 ) {
 	failedChannels := make(map[int]bool)
 	var lastError error
@@ -156,6 +298,11 @@ func handleMultiChannel(
 
 		upstream := selection.Upstream
 		channelIndex := selection.ChannelIndex
+		if reqCtx != nil {
+			reqCtx.channelIndex = channelIndex
+			reqCtx.channelName = upstream.Name
+			reqCtx.updateLive()
+		}
 
 		if envCfg.ShouldLog("info") {
 			log.Printf("[Gemini-Select] 选择渠道: [%d] %s (原因: %s, 尝试 %d/%d)",
@@ -165,11 +312,23 @@ func handleMultiChannel(
 		success, successKey, successBaseURLIdx, failoverErr, usage := tryChannelWithAllKeys(
 			c, envCfg, cfgManager, channelScheduler, upstream, channelIndex,
 			bodyBytes, geminiReq, model, isStream, startTime,
+			reqCtx,
 		)
 
 		if success {
 			if successKey != "" {
-				channelScheduler.RecordGeminiSuccessWithUsage(upstream.GetAllBaseURLs()[successBaseURLIdx], successKey, usage)
+				if reqCtx != nil {
+					reqCtx.apiKey = successKey
+					reqCtx.usage = usage
+					reqCtx.success = true
+					reqCtx.errorMsg = ""
+					reqCtx.updateLive()
+				}
+				channelScheduler.RecordGeminiSuccessWithUsage(upstream.GetAllBaseURLs()[successBaseURLIdx], successKey, usage, model, 0)
+			}
+			if reqCtx != nil && successKey == "" {
+				reqCtx.success = true
+				reqCtx.errorMsg = ""
 			}
 			channelScheduler.SetTraceAffinity(userID, channelIndex)
 			return
@@ -186,6 +345,14 @@ func handleMultiChannel(
 	}
 
 	log.Printf("[Gemini-Error] 所有渠道都失败了")
+	if reqCtx != nil {
+		reqCtx.success = false
+		if lastError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(lastError.Error())
+		} else if lastFailoverError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(string(lastFailoverError.Body))
+		}
+	}
 	handleAllChannelsFailed(c, lastFailoverError, lastError)
 }
 
@@ -202,6 +369,7 @@ func tryChannelWithAllKeys(
 	model string,
 	isStream bool,
 	startTime time.Time,
+	reqCtx *requestLogContext,
 ) (bool, string, int, *common.FailoverError, *types.Usage) {
 	if len(upstream.APIKeys) == 0 {
 		return false, "", 0, nil, nil
@@ -234,6 +402,12 @@ func tryChannelWithAllKeys(
 			apiKey, err := cfgManager.GetNextGeminiAPIKey(upstream, failedKeys)
 			if err != nil {
 				break
+			}
+			if reqCtx != nil {
+				reqCtx.channelIndex = channelIndex
+				reqCtx.channelName = upstream.Name
+				reqCtx.apiKey = apiKey
+				reqCtx.updateLive()
 			}
 
 			// 检查熔断状态
@@ -292,6 +466,10 @@ func tryChannelWithAllKeys(
 
 				// 非 failover 错误
 				channelScheduler.RecordGeminiFailure(currentBaseURL, apiKey)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(string(respBodyBytes))
+				}
 				c.Data(resp.StatusCode, "application/json", respBodyBytes)
 				return true, "", 0, nil, nil
 			}
@@ -305,6 +483,11 @@ func tryChannelWithAllKeys(
 			channelScheduler.MarkURLSuccess(channelIndex, currentBaseURL)
 
 			usage := handleSuccess(c, resp, upstream.ServiceType, envCfg, startTime, geminiReq, model, isStream)
+			if reqCtx != nil {
+				reqCtx.usage = usage
+				reqCtx.success = true
+				reqCtx.errorMsg = ""
+			}
 			return true, apiKey, originalIdx, nil, usage
 		}
 
@@ -327,9 +510,14 @@ func handleSingleChannel(
 	model string,
 	isStream bool,
 	startTime time.Time,
+	reqCtx *requestLogContext,
 ) {
 	upstream, err := cfgManager.GetCurrentGeminiUpstream()
 	if err != nil {
+		if reqCtx != nil {
+			reqCtx.success = false
+			reqCtx.errorMsg = "No Gemini upstream configured"
+		}
 		c.JSON(503, types.GeminiError{
 			Error: types.GeminiErrorDetail{
 				Code:    503,
@@ -341,6 +529,13 @@ func handleSingleChannel(
 	}
 
 	if len(upstream.APIKeys) == 0 {
+		if reqCtx != nil {
+			reqCtx.channelIndex = 0
+			reqCtx.channelName = upstream.Name
+			reqCtx.success = false
+			reqCtx.errorMsg = "No API keys configured"
+			reqCtx.updateLive()
+		}
 		c.JSON(503, types.GeminiError{
 			Error: types.GeminiErrorDetail{
 				Code:    503,
@@ -353,6 +548,12 @@ func handleSingleChannel(
 
 	metricsManager := channelScheduler.GetGeminiMetricsManager()
 	baseURLs := upstream.GetAllBaseURLs()
+
+	if reqCtx != nil {
+		reqCtx.channelIndex = 0
+		reqCtx.channelName = upstream.Name
+		reqCtx.updateLive()
+	}
 
 	var lastError error
 	var lastFailoverError *common.FailoverError
@@ -374,6 +575,10 @@ func handleSingleChannel(
 			if err != nil {
 				lastError = err
 				break
+			}
+			if reqCtx != nil {
+				reqCtx.apiKey = apiKey
+				reqCtx.updateLive()
 			}
 
 			if !forceProbeMode && metricsManager.ShouldSuspendKey(currentBaseURL, apiKey) {
@@ -431,6 +636,10 @@ func handleSingleChannel(
 				}
 
 				channelScheduler.RecordGeminiFailure(currentBaseURL, apiKey)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(string(respBodyBytes))
+				}
 				c.Data(resp.StatusCode, "application/json", respBodyBytes)
 				return
 			}
@@ -442,12 +651,25 @@ func handleSingleChannel(
 			}
 
 			usage := handleSuccess(c, resp, upstream.ServiceType, envCfg, startTime, geminiReq, model, isStream)
-			channelScheduler.RecordGeminiSuccessWithUsage(currentBaseURL, apiKey, usage)
+			channelScheduler.RecordGeminiSuccessWithUsage(currentBaseURL, apiKey, usage, model, 0)
+			if reqCtx != nil {
+				reqCtx.usage = usage
+				reqCtx.success = true
+				reqCtx.errorMsg = ""
+			}
 			return
 		}
 	}
 
 	log.Printf("[Gemini-Error] 所有 API密钥都失败了")
+	if reqCtx != nil {
+		reqCtx.success = false
+		if lastError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(lastError.Error())
+		} else if lastFailoverError != nil {
+			reqCtx.errorMsg = truncateErrorMessage(string(lastFailoverError.Body))
+		}
+	}
 	handleAllKeysFailed(c, lastFailoverError, lastError)
 }
 

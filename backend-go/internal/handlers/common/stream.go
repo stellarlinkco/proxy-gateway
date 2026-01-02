@@ -333,8 +333,14 @@ func logStreamCompletion(ctx *StreamContext, envCfg *config.EnvConfig, startTime
 		}
 	}
 
+	// 计算成本
+	var costCents int64
+	if billingHandler != nil && usage != nil {
+		costCents = billingHandler.CalculateCost(model, usage.InputTokens, usage.OutputTokens)
+	}
+
 	// 记录成功指标
-	channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, apiKey, usage, false)
+	channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, apiKey, usage, false, model, costCents)
 
 	// 计费扣费
 	if billingHandler != nil && billingCtx != nil && usage != nil {
@@ -393,13 +399,13 @@ func HandleStreamResponse(
 	billingHandler *billing.Handler,
 	billingCtx *billing.RequestContext,
 	model string,
-) {
+) (*types.Usage, int64, error) {
 	defer resp.Body.Close()
 
 	eventChan, errChan, err := provider.HandleStreamResponse(resp.Body)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to handle stream response"})
-		return
+		return nil, 0, err
 	}
 
 	SetupStreamHeaders(c, resp)
@@ -408,13 +414,39 @@ func HandleStreamResponse(
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Printf("[Messages-Stream] 警告: ResponseWriter不支持Flush接口")
-		return
+		return nil, 0, fmt.Errorf("response writer does not support http.Flusher")
 	}
 	flusher.Flush()
 
 	ctx := NewStreamContext(envCfg)
 	seedSynthesizerFromRequest(ctx, requestBody)
-	ProcessStreamEvents(c, w, flusher, eventChan, errChan, ctx, envCfg, startTime, requestBody, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
+	streamErr := ProcessStreamEvents(c, w, flusher, eventChan, errChan, ctx, envCfg, startTime, requestBody, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
+
+	var usage *types.Usage
+	hasUsageData := ctx.CollectedUsage.InputTokens > 0 ||
+		ctx.CollectedUsage.OutputTokens > 0 ||
+		ctx.CollectedUsage.CacheCreationInputTokens > 0 ||
+		ctx.CollectedUsage.CacheReadInputTokens > 0 ||
+		ctx.CollectedUsage.CacheCreation5mInputTokens > 0 ||
+		ctx.CollectedUsage.CacheCreation1hInputTokens > 0
+	if hasUsageData {
+		usage = &types.Usage{
+			InputTokens:                ctx.CollectedUsage.InputTokens,
+			OutputTokens:               ctx.CollectedUsage.OutputTokens,
+			CacheCreationInputTokens:   ctx.CollectedUsage.CacheCreationInputTokens,
+			CacheReadInputTokens:       ctx.CollectedUsage.CacheReadInputTokens,
+			CacheCreation5mInputTokens: ctx.CollectedUsage.CacheCreation5mInputTokens,
+			CacheCreation1hInputTokens: ctx.CollectedUsage.CacheCreation1hInputTokens,
+			CacheTTL:                   ctx.CollectedUsage.CacheTTL,
+		}
+	}
+
+	var costCents int64
+	if billingHandler != nil && usage != nil {
+		costCents = billingHandler.CalculateCost(model, usage.InputTokens, usage.OutputTokens)
+	}
+
+	return usage, costCents, streamErr
 }
 
 // ========== Token 检测和修补相关函数 ==========
