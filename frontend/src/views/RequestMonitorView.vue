@@ -7,8 +7,8 @@
       </div>
 
       <v-tabs v-model="apiTypeModel" color="primary" density="compact" grow class="api-type-tabs">
-        <v-tab value="messages">Messages</v-tab>
-        <v-tab value="responses">Responses</v-tab>
+        <v-tab value="messages">Claude</v-tab>
+        <v-tab value="responses">Codex</v-tab>
         <v-tab value="gemini">Gemini</v-tab>
       </v-tabs>
     </div>

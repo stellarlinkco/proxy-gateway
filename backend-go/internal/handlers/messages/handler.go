@@ -850,7 +850,7 @@ func handleNormalResponse(
 	// 计算成本
 	var costCents int64
 	if billingHandler != nil && claudeResp.Usage != nil {
-		costCents = billingHandler.CalculateCost(model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens)
+		costCents = billingHandler.CalculateCost(model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens, claudeResp.Usage.CacheCreationInputTokens, claudeResp.Usage.CacheReadInputTokens)
 	}
 
 	// 记录成功指标
@@ -864,7 +864,7 @@ func handleNormalResponse(
 
 	// 计费扣费
 	if billingHandler != nil && billingCtx != nil && claudeResp.Usage != nil {
-		billingHandler.AfterRequest(billingCtx, model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens)
+		billingHandler.AfterRequest(billingCtx, model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens, claudeResp.Usage.CacheCreationInputTokens, claudeResp.Usage.CacheReadInputTokens)
 	}
 
 	if envCfg.EnableResponseLogs {

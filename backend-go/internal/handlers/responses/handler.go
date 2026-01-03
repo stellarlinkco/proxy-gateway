@@ -291,7 +291,7 @@ func handleMultiChannel(
 			if successKey != "" {
 				var costCents int64
 				if billingHandler != nil && usage != nil {
-					costCents = billingHandler.CalculateCost(responsesReq.Model, usage.InputTokens, usage.OutputTokens)
+					costCents = billingHandler.CalculateCost(responsesReq.Model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 				}
 				if reqCtx != nil {
 					reqCtx.apiKey = successKey
@@ -473,7 +473,7 @@ func tryChannelWithAllKeys(
 			usage := handleSuccess(c, resp, provider, upstream.ServiceType, envCfg, sessionManager, startTime, &responsesReq, bodyBytes)
 			// 计费扣费
 			if billingHandler != nil && billingCtx != nil && usage != nil {
-				billingHandler.AfterRequest(billingCtx, responsesReq.Model, usage.InputTokens, usage.OutputTokens)
+				billingHandler.AfterRequest(billingCtx, responsesReq.Model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 			}
 			if reqCtx != nil {
 				reqCtx.usage = usage
@@ -690,7 +690,7 @@ func handleSingleChannel(
 			usage := handleSuccess(c, resp, provider, upstream.ServiceType, envCfg, sessionManager, startTime, &responsesReq, bodyBytes)
 			var costCents int64
 			if billingHandler != nil && usage != nil {
-				costCents = billingHandler.CalculateCost(responsesReq.Model, usage.InputTokens, usage.OutputTokens)
+				costCents = billingHandler.CalculateCost(responsesReq.Model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 			}
 			channelScheduler.RecordSuccessWithUsage(currentBaseURL, apiKey, usage, true, responsesReq.Model, costCents)
 			if reqCtx != nil {
@@ -701,7 +701,7 @@ func handleSingleChannel(
 			}
 			// 计费扣费
 			if billingHandler != nil && billingCtx != nil && usage != nil {
-				billingHandler.AfterRequest(billingCtx, responsesReq.Model, usage.InputTokens, usage.OutputTokens)
+				billingHandler.AfterRequest(billingCtx, responsesReq.Model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 			}
 			return
 		}

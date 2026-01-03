@@ -111,6 +111,14 @@
           </span>
         </template>
 
+        <template #item.cacheReadTokens="{ item }">
+          <span class="text-caption">{{ formatCacheTokens(item.cacheReadTokens) }}</span>
+        </template>
+
+        <template #item.cacheCreationTokens="{ item }">
+          <span class="text-caption">{{ formatCacheTokens(item.cacheCreationTokens) }}</span>
+        </template>
+
         <template #item.costCents="{ item }">
           <span class="text-caption">{{ formatCost(item.costCents) }}</span>
         </template>
@@ -135,6 +143,8 @@ const headers = [
   { title: '状态', key: 'statusCode', width: '70px', align: 'center', sortable: false },
   { title: '耗时', key: 'durationMs', width: '80px', align: 'end', sortable: false },
   { title: 'Token', key: 'tokens', width: '120px', align: 'end', sortable: false },
+  { title: 'Read Cache', key: 'cacheReadTokens', width: '90px', align: 'end', sortable: false },
+  { title: 'Write Cache', key: 'cacheCreationTokens', width: '90px', align: 'end', sortable: false },
   { title: '成本', key: 'costCents', width: '80px', align: 'end', sortable: false },
 ] as const
 
@@ -186,6 +196,11 @@ function formatTokens(inputTokens: number, outputTokens: number) {
   const input = Number.isFinite(inputTokens) ? inputTokens : 0
   const output = Number.isFinite(outputTokens) ? outputTokens : 0
   return `${input} / ${output}`
+}
+
+function formatCacheTokens(tokens: unknown) {
+  const value = typeof tokens === 'number' && Number.isFinite(tokens) ? tokens : 0
+  return value === 0 ? '--' : String(value)
 }
 
 function formatCost(costCents: number) {

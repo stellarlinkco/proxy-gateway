@@ -138,12 +138,43 @@ func ProcessStreamEvents(
 	billingCtx *billing.RequestContext,
 	model string,
 ) error {
+	handleStreamErr := func(err error) error {
+		log.Printf("[Messages-Stream] 错误: 流式传输错误: %v", err)
+		logPartialResponse(ctx, envCfg)
+
+		// 记录失败指标
+		channelScheduler.RecordFailure(upstream.BaseURL, apiKey, false)
+
+		// 向客户端发送错误事件（如果连接仍然有效）
+		if !ctx.ClientGone {
+			errorEvent := BuildStreamErrorEvent(err)
+			w.Write([]byte(errorEvent))
+			flusher.Flush()
+		}
+
+		return err
+	}
+
 	for {
 		select {
 		case event, ok := <-eventChan:
 			if !ok {
-				logStreamCompletion(ctx, envCfg, startTime, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
-				return nil
+				// eventChan 已关闭，但 errChan 可能仍有缓冲错误；这里做一次非阻塞 drain，避免吞掉错误。
+				for {
+					select {
+					case err, ok := <-errChan:
+						if !ok {
+							logStreamCompletion(ctx, envCfg, startTime, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
+							return nil
+						}
+						if err != nil {
+							return handleStreamErr(err)
+						}
+					default:
+						logStreamCompletion(ctx, envCfg, startTime, channelScheduler, upstream, apiKey, billingHandler, billingCtx, model)
+						return nil
+					}
+				}
 			}
 			ProcessStreamEvent(c, w, flusher, event, ctx, envCfg, requestBody)
 
@@ -152,20 +183,7 @@ func ProcessStreamEvents(
 				continue
 			}
 			if err != nil {
-				log.Printf("[Messages-Stream] 错误: 流式传输错误: %v", err)
-				logPartialResponse(ctx, envCfg)
-
-				// 记录失败指标
-				channelScheduler.RecordFailure(upstream.BaseURL, apiKey, false)
-
-				// 向客户端发送错误事件（如果连接仍然有效）
-				if !ctx.ClientGone {
-					errorEvent := BuildStreamErrorEvent(err)
-					w.Write([]byte(errorEvent))
-					flusher.Flush()
-				}
-
-				return err
+				return handleStreamErr(err)
 			}
 		}
 	}
@@ -346,7 +364,7 @@ func logStreamCompletion(ctx *StreamContext, envCfg *config.EnvConfig, startTime
 	// 计算成本
 	var costCents int64
 	if billingHandler != nil && usage != nil {
-		costCents = billingHandler.CalculateCost(model, usage.InputTokens, usage.OutputTokens)
+		costCents = billingHandler.CalculateCost(model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 	}
 
 	// 记录成功指标
@@ -354,7 +372,7 @@ func logStreamCompletion(ctx *StreamContext, envCfg *config.EnvConfig, startTime
 
 	// 计费扣费
 	if billingHandler != nil && billingCtx != nil && usage != nil {
-		billingHandler.AfterRequest(billingCtx, model, usage.InputTokens, usage.OutputTokens)
+		billingHandler.AfterRequest(billingCtx, model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 	}
 }
 
@@ -456,7 +474,7 @@ func HandleStreamResponse(
 
 	var costCents int64
 	if billingHandler != nil && usage != nil {
-		costCents = billingHandler.CalculateCost(model, usage.InputTokens, usage.OutputTokens)
+		costCents = billingHandler.CalculateCost(model, usage.InputTokens, usage.OutputTokens, usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 	}
 
 	return usage, costCents, streamErr

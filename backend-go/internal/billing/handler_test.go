@@ -105,7 +105,7 @@ func TestHandler_AfterRequest(t *testing.T) {
 		Charged:      false,
 	}
 
-	handler.AfterRequest(ctx, "claude-3-5-sonnet-20241022", 1000, 500)
+	handler.AfterRequest(ctx, "claude-3-5-sonnet-20241022", 1000, 500, 0, 0)
 
 	if !ctx.Charged {
 		t.Error("AfterRequest() should set Charged = true")
@@ -126,14 +126,14 @@ func TestHandler_AfterRequest_AlreadyCharged(t *testing.T) {
 	}
 
 	// 不应 panic
-	handler.AfterRequest(ctx, "model", 100, 50)
+	handler.AfterRequest(ctx, "model", 100, 50, 0, 0)
 }
 
 func TestHandler_AfterRequest_NilContext(t *testing.T) {
 	handler := NewHandler(nil, nil, nil, 500)
 
 	// 不应 panic
-	handler.AfterRequest(nil, "model", 100, 50)
+	handler.AfterRequest(nil, "model", 100, 50, 0, 0)
 }
 
 func TestHandler_AfterRequest_NilDependencies(t *testing.T) {
@@ -148,7 +148,7 @@ func TestHandler_AfterRequest_NilDependencies(t *testing.T) {
 	}
 
 	// 不应 panic，应该安全返回
-	handler.AfterRequest(ctx, "model", 100, 50)
+	handler.AfterRequest(ctx, "model", 100, 50, 0, 0)
 
 	// Charged 应该保持 false（因为依赖项为 nil，无法扣费）
 	if ctx.Charged {
@@ -299,7 +299,7 @@ func TestHandler_AfterRequest_ChargeFailed(t *testing.T) {
 		Charged:      false,
 	}
 
-	handler.AfterRequest(ctx, "claude-3-5-sonnet-20241022", 1000, 500)
+	handler.AfterRequest(ctx, "claude-3-5-sonnet-20241022", 1000, 500, 0, 0)
 
 	// 扣费失败时应该释放预授权
 	if chargeCallCount != 1 {

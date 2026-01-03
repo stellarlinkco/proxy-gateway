@@ -66,7 +66,7 @@ func (h *Handler) BeforeRequest(c *gin.Context) (*RequestContext, error) {
 }
 
 // AfterRequest 请求后处理：扣费
-func (h *Handler) AfterRequest(ctx *RequestContext, model string, inputTokens, outputTokens int) {
+func (h *Handler) AfterRequest(ctx *RequestContext, model string, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) {
 	if ctx == nil || ctx.Charged {
 		return
 	}
@@ -78,7 +78,7 @@ func (h *Handler) AfterRequest(ctx *RequestContext, model string, inputTokens, o
 	}
 
 	// 计算实际成本
-	actualCents := h.pricingService.Calculate(model, inputTokens, outputTokens)
+	actualCents := h.pricingService.Calculate(model, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens)
 
 	// 扣费
 	description := model + " API call"
@@ -122,9 +122,9 @@ func (h *Handler) IsEnabled() bool {
 }
 
 // CalculateCost 计算成本（美分）
-func (h *Handler) CalculateCost(model string, inputTokens, outputTokens int) int64 {
+func (h *Handler) CalculateCost(model string, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) int64 {
 	if h.pricingService == nil {
 		return 0
 	}
-	return h.pricingService.Calculate(model, inputTokens, outputTokens)
+	return h.pricingService.Calculate(model, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens)
 }

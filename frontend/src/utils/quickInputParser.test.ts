@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { isValidApiKey, isValidUrl, parseQuickInput } from './quickInputParser'
+import { detectServiceType, isValidApiKey, isValidUrl, parseQuickInput } from './quickInputParser'
 
 describe('API Key 识别', () => {
   describe('OpenAI 格式', () => {
@@ -103,6 +103,8 @@ describe('API Key 识别', () => {
       expect(isValidApiKey('ut_abc123456789')).toBe(true)
       expect(isValidApiKey('api-key12345678901')).toBe(true)
       expect(isValidApiKey('cr_xxxxxxxxx123')).toBe(true)
+      // 不在宽松兜底前缀列表中，必须命中“通用前缀”规则
+      expect(isValidApiKey('ab-abc123456789')).toBe(true)
     })
 
     it('不应识别单字母前缀', () => {
@@ -292,6 +294,54 @@ describe('URL 识别', () => {
 })
 
 describe('综合解析场景', () => {
+  it('应根据端点识别服务类型并清理 URL', () => {
+    const cases: Array<{
+      input: string
+      expectedBaseUrl: string
+      expectedServiceType: 'openai' | 'gemini' | 'claude' | 'responses'
+    }> = [
+      {
+        input: 'https://api.example.com/v1/messages sk-key1234567890',
+        expectedBaseUrl: 'https://api.example.com/v1',
+        expectedServiceType: 'claude'
+      },
+      {
+        input: 'https://api.example.com/v1/chat/completions sk-key1234567890',
+        expectedBaseUrl: 'https://api.example.com/v1',
+        expectedServiceType: 'openai'
+      },
+      {
+        input: 'https://api.example.com/v1/responses sk-key1234567890',
+        expectedBaseUrl: 'https://api.example.com/v1',
+        expectedServiceType: 'responses'
+      },
+      {
+        input: 'https://api.example.com/v1/generateContent sk-key1234567890',
+        expectedBaseUrl: 'https://api.example.com/v1',
+        expectedServiceType: 'gemini'
+      }
+    ]
+
+    for (const c of cases) {
+      const result = parseQuickInput(c.input)
+      expect(result.detectedBaseUrl).toBe(c.expectedBaseUrl)
+      expect(result.detectedServiceType).toBe(c.expectedServiceType)
+    }
+  })
+
+  it('应在清理端点后保留 # 结尾', () => {
+    const result = parseQuickInput('https://api.example.com/v1/messages# sk-key1234567890')
+    expect(result.detectedBaseUrl).toBe('https://api.example.com/v1#')
+    expect(result.detectedServiceType).toBe('claude')
+  })
+
+  it('detectServiceType 应按端点返回服务类型', () => {
+    expect(detectServiceType('https://api.example.com/v1/messages')).toBe('claude')
+    expect(detectServiceType('https://api.example.com/v1/chat/completions')).toBe('openai')
+    expect(detectServiceType('https://api.example.com/v1/responses')).toBe('responses')
+    expect(detectServiceType('https://api.example.com/v1/generateContent')).toBe('gemini')
+  })
+
   it('应正确解析 URL + 多个 API Key', () => {
     const input = `
       https://api.openai.com/v1

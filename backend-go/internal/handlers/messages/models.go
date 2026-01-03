@@ -2,6 +2,8 @@
 package messages
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BenedictKing/claude-proxy/internal/cache"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/httpclient"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
@@ -19,6 +22,7 @@ import (
 )
 
 const modelsRequestTimeout = 30 * time.Second
+const modelsCacheContentType = gin.MIMEJSON
 
 // ModelsResponse OpenAI 兼容的 models 响应格式
 type ModelsResponse struct {
@@ -34,15 +38,47 @@ type ModelEntry struct {
 	OwnedBy string `json:"owned_by"`
 }
 
+func modelsCacheKey(r *http.Request) string {
+	if r == nil || r.URL == nil {
+		return ""
+	}
+
+	queryHash := sha256.Sum256([]byte(r.URL.Query().Encode()))
+	return r.URL.Path + ":" + hex.EncodeToString(queryHash[:])
+}
+
+func writeCachedHTTPResponse(c *gin.Context, resp cache.HTTPResponse) {
+	if c == nil {
+		return
+	}
+
+	for k, v := range resp.Header {
+		c.Writer.Header()[k] = append([]string(nil), v...)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = modelsCacheContentType
+	}
+
+	c.Data(resp.StatusCode, contentType, resp.Body)
+}
+
 // ModelsHandler 处理 /v1/models 请求，从 Messages 和 Responses 渠道获取并合并模型列表
-func ModelsHandler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channelScheduler *scheduler.ChannelScheduler) gin.HandlerFunc {
+func ModelsHandler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channelScheduler *scheduler.ChannelScheduler, respCache *cache.HTTPResponseCache) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		middleware.ProxyAuthMiddleware(envCfg)(c)
 		if c.IsAborted() {
 			return
 		}
 
-		// 并行从两种渠道获取模型列表
+		cacheKey := modelsCacheKey(c.Request)
+		if cached, ok := respCache.Get(cacheKey); ok {
+			writeCachedHTTPResponse(c, cached)
+			return
+		}
+
+		// 从两种渠道获取模型列表（Messages/Responses）
 		messagesModels := fetchModelsFromChannels(c, cfgManager, channelScheduler, false)
 		responsesModels := fetchModelsFromChannels(c, cfgManager, channelScheduler, true)
 
@@ -67,7 +103,18 @@ func ModelsHandler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, c
 		log.Printf("[Models] 合并完成: messages=%d, responses=%d, merged=%d",
 			len(messagesModels), len(responsesModels), len(mergedModels))
 
-		c.JSON(http.StatusOK, response)
+		body, err := json.Marshal(response)
+		if err != nil {
+			c.JSON(http.StatusOK, response)
+			return
+		}
+
+		respCache.Set(cacheKey, cache.HTTPResponse{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{modelsCacheContentType}},
+			Body:       body,
+		})
+		c.Data(http.StatusOK, modelsCacheContentType, body)
 	}
 }
 

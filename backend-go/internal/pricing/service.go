@@ -13,13 +13,15 @@ const LiteLLMPricingURL = "https://raw.githubusercontent.com/BerriAI/litellm/mai
 
 // ModelPricing LiteLLM 模型价格信息
 type ModelPricing struct {
-	InputCostPerToken  float64 `json:"input_cost_per_token"`
-	OutputCostPerToken float64 `json:"output_cost_per_token"`
-	MaxTokens          int     `json:"max_tokens"`
-	MaxInputTokens     int     `json:"max_input_tokens"`
-	MaxOutputTokens    int     `json:"max_output_tokens"`
-	LiteLLMProvider    string  `json:"litellm_provider"`
-	Mode               string  `json:"mode"`
+	InputCostPerToken           float64 `json:"input_cost_per_token"`
+	OutputCostPerToken          float64 `json:"output_cost_per_token"`
+	CacheCreationInputTokenCost float64 `json:"cache_creation_input_token_cost"`
+	CacheReadInputTokenCost     float64 `json:"cache_read_input_token_cost"`
+	MaxTokens                   int     `json:"max_tokens"`
+	MaxInputTokens              int     `json:"max_input_tokens"`
+	MaxOutputTokens             int     `json:"max_output_tokens"`
+	LiteLLMProvider             string  `json:"litellm_provider"`
+	Mode                        string  `json:"mode"`
 }
 
 // Service 价格表服务
@@ -95,16 +97,18 @@ func (s *Service) Stop() {
 }
 
 // Calculate 计算成本 (返回 cents)
-func (s *Service) Calculate(model string, inputTokens, outputTokens int) int64 {
+func (s *Service) Calculate(model string, inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) int64 {
 	pricing := s.getOrFuzzyMatch(model)
 	if pricing == nil {
-		return s.calculateDefault(inputTokens, outputTokens)
+		return s.calculateDefault(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens)
 	}
 
 	// LiteLLM: USD per token → cents
 	inputCostUSD := float64(inputTokens) * pricing.InputCostPerToken
 	outputCostUSD := float64(outputTokens) * pricing.OutputCostPerToken
-	return int64((inputCostUSD + outputCostUSD) * 100)
+	cacheCreationCostUSD := float64(cacheCreationTokens) * pricing.CacheCreationInputTokenCost
+	cacheReadCostUSD := float64(cacheReadTokens) * pricing.CacheReadInputTokenCost
+	return int64((inputCostUSD + outputCostUSD + cacheCreationCostUSD + cacheReadCostUSD) * 100)
 }
 
 // getOrFuzzyMatch 精确匹配或模糊匹配模型
@@ -137,11 +141,23 @@ func (s *Service) getOrFuzzyMatch(model string) *ModelPricing {
 }
 
 // calculateDefault 默认价格计算 (Claude 3.5 Sonnet 价格作为默认)
-func (s *Service) calculateDefault(inputTokens, outputTokens int) int64 {
-	// 默认使用 Claude 3.5 Sonnet 价格: $3/M input, $15/M output
-	inputCostUSD := float64(inputTokens) * 3.0 / 1_000_000
-	outputCostUSD := float64(outputTokens) * 15.0 / 1_000_000
-	return int64((inputCostUSD + outputCostUSD) * 100)
+func (s *Service) calculateDefault(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int) int64 {
+	// 默认使用 Claude 3.5 Sonnet 价格:
+	// input: $3/M, output: $15/M, cache creation: $3.75/M, cache read: $0.3/M
+	//
+	// 用整数运算避免 float64 精度问题（尤其是 $0.3/M 这类无法精确表示的值）。
+	const (
+		perMillion       = int64(1_000_000)
+		inputCents       = int64(300)  // $3.00/M
+		outputCents      = int64(1500) // $15.00/M
+		cacheCreateCents = int64(375)  // $3.75/M
+		cacheReadCents   = int64(30)   // $0.30/M
+	)
+	total := int64(inputTokens)*inputCents +
+		int64(outputTokens)*outputCents +
+		int64(cacheCreationTokens)*cacheCreateCents +
+		int64(cacheReadTokens)*cacheReadCents
+	return total / perMillion
 }
 
 // GetPricing 获取指定模型的价格信息

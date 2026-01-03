@@ -90,3 +90,77 @@ func TestLiveRequestsHandler_GetLiveRequests_ManagerNilReturns503(t *testing.T) 
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 }
+
+func TestLiveRequestsHandler_GetLiveRequests_FallbackToRequestPathWhenFullPathEmpty(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	m := monitor.NewLiveRequestManager(50)
+	h := NewLiveRequestsHandler(m)
+
+	base := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	m.StartRequest(&monitor.LiveRequest{RequestID: "m1", APIType: "messages", StartTime: base.Add(1 * time.Second)})
+	m.StartRequest(&monitor.LiveRequest{RequestID: "r1", APIType: "responses", StartTime: base.Add(2 * time.Second)})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/messages/live", nil)
+	h.GetLiveRequests(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp monitor.LiveRequestsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal err = %v", err)
+	}
+	if resp.Count != 1 || len(resp.Requests) != 1 || resp.Requests[0].RequestID != "m1" {
+		t.Fatalf("resp=%+v, want 1 item m1", resp)
+	}
+}
+
+func TestLiveRequestsHandler_GetLiveRequests_EmptyAPITypeReturnsAll(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	m := monitor.NewLiveRequestManager(50)
+	h := NewLiveRequestsHandler(m)
+
+	base := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	m.StartRequest(&monitor.LiveRequest{RequestID: "m1", APIType: "messages", StartTime: base.Add(1 * time.Second)})
+	m.StartRequest(&monitor.LiveRequest{RequestID: "r1", APIType: "responses", StartTime: base.Add(2 * time.Second)})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/live", nil)
+	h.GetLiveRequests(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp monitor.LiveRequestsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal err = %v", err)
+	}
+	if resp.Count != 2 || len(resp.Requests) != 2 {
+		t.Fatalf("count/len=%d/%d, want 2/2", resp.Count, len(resp.Requests))
+	}
+}
+
+func TestApiTypeFromAdminLivePath_CoversInvalidCases(t *testing.T) {
+	cases := map[string]string{
+		"":                 "",
+		"/api/messages":    "",
+		"/api/live":        "",
+		"/bad/x/live":      "",
+		"/api/x/bad":       "",
+		"/api/x/live":      "",
+		"/api/gemini/live": "gemini",
+	}
+
+	for path, want := range cases {
+		if got := apiTypeFromAdminLivePath(path); got != want {
+			t.Fatalf("apiTypeFromAdminLivePath(%q)=%q, want %q", path, got, want)
+		}
+	}
+}

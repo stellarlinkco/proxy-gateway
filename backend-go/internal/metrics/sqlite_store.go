@@ -101,6 +101,9 @@ func NewSQLiteStore(cfg *SQLiteStoreConfig) (*SQLiteStore, error) {
 		stopCh:        make(chan struct{}),
 	}
 
+	// 启动前先同步清理一次，避免后台 goroutine 的调度不确定性影响调用方（尤其是测试）。
+	store.doCleanup()
+
 	// 启动后台任务
 	store.wg.Add(2)
 	go store.flushLoop()
@@ -469,9 +472,6 @@ func (s *SQLiteStore) flushLoop() {
 // cleanupLoop 定期清理循环
 func (s *SQLiteStore) cleanupLoop() {
 	defer s.wg.Done()
-
-	// 启动时先清理一次
-	s.doCleanup()
 
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()

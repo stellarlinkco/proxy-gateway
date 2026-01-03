@@ -19,6 +19,8 @@
 
     <!-- 故障转移序列 (active + suspended) -->
     <div class="pt-3 pb-2">
+      <CacheStats class="mb-3" />
+
       <div class="d-flex align-center justify-space-between mb-2">
         <div class="text-subtitle-2 text-medium-emphasis d-flex align-center">
           <v-icon size="small" class="mr-1" color="success">mdi-play-circle</v-icon>
@@ -364,6 +366,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import draggable from 'vuedraggable'
 import { api, type Channel, type ChannelMetrics, type ChannelStatus, type TimeWindowStats } from '../services/api'
+import CacheStats from './CacheStats.vue'
 import ChannelStatusBadge from './ChannelStatusBadge.vue'
 import KeyTrendChart from './KeyTrendChart.vue'
 

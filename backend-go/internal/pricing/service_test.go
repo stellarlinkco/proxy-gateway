@@ -32,17 +32,25 @@ func TestService_Calculate(t *testing.T) {
 				InputCostPerToken:  0.000003,
 				OutputCostPerToken: 0.000015,
 			},
+			"test-cache": {
+				InputCostPerToken:           0.25,   // 25 cents / token
+				OutputCostPerToken:          0.5,    // 50 cents / token
+				CacheCreationInputTokenCost: 0.125,  // 12.5 cents / token
+				CacheReadInputTokenCost:     0.0625, // 6.25 cents / token
+			},
 		},
 		updateInterval: 24 * time.Hour,
 		stopCh:         make(chan struct{}),
 	}
 
 	tests := []struct {
-		name         string
-		model        string
-		inputTokens  int
-		outputTokens int
-		wantCents    int64
+		name                string
+		model               string
+		inputTokens         int
+		outputTokens        int
+		cacheCreationTokens int
+		cacheReadTokens     int
+		wantCents           int64
 	}{
 		{
 			name:         "claude sonnet",
@@ -50,6 +58,24 @@ func TestService_Calculate(t *testing.T) {
 			inputTokens:  1000,
 			outputTokens: 500,
 			wantCents:    1, // (1000 * 0.000003 + 500 * 0.000015) * 100 = 1.05 -> 1
+		},
+		{
+			name:                "missing cache pricing treated as free",
+			model:               "claude-3-5-sonnet-20241022",
+			inputTokens:         1000,
+			outputTokens:        500,
+			cacheCreationTokens: 1000,
+			cacheReadTokens:     1000,
+			wantCents:           1, // cache 字段缺失时，默认 0 成本
+		},
+		{
+			name:                "explicit cache pricing included",
+			model:               "test-cache",
+			inputTokens:         4,
+			outputTokens:        2,
+			cacheCreationTokens: 8,
+			cacheReadTokens:     16,
+			wantCents:           400,
 		},
 		{
 			name:         "unknown model uses default",
@@ -62,7 +88,7 @@ func TestService_Calculate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := svc.Calculate(tt.model, tt.inputTokens, tt.outputTokens)
+			got := svc.Calculate(tt.model, tt.inputTokens, tt.outputTokens, tt.cacheCreationTokens, tt.cacheReadTokens)
 			if got != tt.wantCents {
 				t.Errorf("Calculate() = %v, want %v", got, tt.wantCents)
 			}
@@ -108,9 +134,14 @@ func TestService_calculateDefault(t *testing.T) {
 	// 默认使用 Claude 3.5 Sonnet 价格: $3/M input, $15/M output
 	// 1000 input + 500 output = (1000 * 3 / 1M + 500 * 15 / 1M) * 100 cents
 	// = (0.003 + 0.0075) * 100 = 1.05 cents -> 1
-	got := svc.calculateDefault(1000, 500)
+	got := svc.calculateDefault(1000, 500, 0, 0)
 	if got != 1 {
 		t.Errorf("calculateDefault() = %v, want 1", got)
+	}
+
+	got = svc.calculateDefault(0, 0, 1_000_000, 1_000_000)
+	if got != 405 {
+		t.Errorf("calculateDefault(cache) = %v, want 405", got)
 	}
 }
 

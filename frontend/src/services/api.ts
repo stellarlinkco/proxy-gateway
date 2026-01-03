@@ -198,6 +198,24 @@ export interface GlobalStatsHistoryResponse {
   warning?: string
 }
 
+// ============== 缓存统计类型 ==============
+
+export interface CacheStats {
+  readHit: number
+  readMiss: number
+  writeSet: number
+  writeUpdate: number
+  entries: number
+  capacity: number
+  /** 0-1 */
+  hitRate: number
+}
+
+export interface CacheStatsResponse {
+  timestamp: string
+  models: CacheStats
+}
+
 // ============== 请求日志与实时监控类型 ==============
 
 export type ApiType = 'messages' | 'responses' | 'gemini'
@@ -487,6 +505,11 @@ class ApiService {
     }
     const query = type === 'responses' ? '?type=responses' : ''
     return this.request(`/messages/channels/scheduler/stats${query}`)
+  }
+
+  // 获取缓存统计信息
+  async getCacheStats(): Promise<CacheStatsResponse> {
+    return this.request('/cache/stats')
   }
 
   // 获取渠道仪表盘数据（合并 channels + metrics + stats）

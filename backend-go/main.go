@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BenedictKing/claude-proxy/internal/billing"
+	"github.com/BenedictKing/claude-proxy/internal/cache"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/handlers"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/gemini"
@@ -134,6 +135,10 @@ func main() {
 	log.Printf("[Scheduler-Init] 多渠道调度器已初始化 (失败率阈值: %.0f%%, 滑动窗口: %d)",
 		messagesMetricsManager.GetFailureThreshold()*100, messagesMetricsManager.GetWindowSize())
 
+	// 初始化 /v1/models 响应缓存（模型列表变化频率低，使用较长 TTL）
+	modelsCacheMetrics := &metrics.CacheMetrics{}
+	modelsResponseCache := cache.NewHTTPResponseCache(200, 10*time.Minute, modelsCacheMetrics)
+
 	// 实时请求监控
 	liveRequestManager := monitor.NewLiveRequestManager(50)
 
@@ -219,6 +224,9 @@ func main() {
 		apiGroup.GET("/messages/ping/:id", messages.PingChannel(cfgManager))
 		apiGroup.GET("/messages/ping", messages.PingAllChannels(cfgManager))
 
+		// 缓存监控 API
+		apiGroup.GET("/cache/stats", handlers.GetCacheStats(modelsResponseCache, modelsCacheMetrics))
+
 		// Responses 渠道管理
 		apiGroup.GET("/responses/channels", responses.GetUpstreams(cfgManager))
 		apiGroup.POST("/responses/channels", responses.AddUpstream(cfgManager))
@@ -284,7 +292,7 @@ func main() {
 	r.POST("/v1/messages/count_tokens", messages.CountTokensHandler(envCfg, cfgManager, channelScheduler))
 
 	// 代理端点 - Models API（转发到上游）
-	r.GET("/v1/models", messages.ModelsHandler(envCfg, cfgManager, channelScheduler))
+	r.GET("/v1/models", messages.ModelsHandler(envCfg, cfgManager, channelScheduler, modelsResponseCache))
 	r.GET("/v1/models/:model", messages.ModelsDetailHandler(envCfg, cfgManager, channelScheduler))
 
 	// 代理端点 - Responses API
