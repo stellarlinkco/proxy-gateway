@@ -568,6 +568,7 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 				"status":             status,
 				"priority":           priority,
 				"promotionUntil":     up.PromotionUntil,
+				"lowQuality":         up.LowQuality,
 			}
 		}
 

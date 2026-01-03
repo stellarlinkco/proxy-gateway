@@ -464,7 +464,7 @@ func tryChannelWithAllKeys(
 			channelScheduler.MarkURLSuccess(channelIndex, currentBaseURL)
 
 			if claudeReq.Stream {
-				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
 				if reqCtx != nil {
 					reqCtx.usage = usage
 					reqCtx.costCents = costCents
@@ -698,7 +698,7 @@ func handleSingleChannel(
 
 			channelScheduler.RecordSuccess(currentBaseURL, apiKey, false)
 			if claudeReq.Stream {
-				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model)
+				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
 				if reqCtx != nil {
 					reqCtx.usage = usage
 					reqCtx.costCents = costCents
