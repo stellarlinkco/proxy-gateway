@@ -3,6 +3,7 @@ package messages
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -66,6 +67,37 @@ func truncateErrorMessage(msg string) string {
 		return msg
 	}
 	return msg[:maxLen] + "..."
+}
+
+type ClientError struct {
+	Err error
+}
+
+func (e *ClientError) Error() string {
+	if e == nil || e.Err == nil {
+		return "client error"
+	}
+	return e.Err.Error()
+}
+
+func (e *ClientError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func asClientError(err error) *ClientError {
+	if err == nil {
+		return nil
+	}
+
+	var syntaxErr *json.SyntaxError
+	var unmarshalTypeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &unmarshalTypeErr) {
+		return &ClientError{Err: err}
+	}
+	return nil
 }
 
 type Handler struct {
@@ -385,9 +417,22 @@ func tryChannelWithAllKeys(
 			providerReq, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
 
 			if err != nil {
-				failedKeys[apiKey] = true
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-				continue
+				if asClientError(err) != nil {
+					if reqCtx != nil {
+						reqCtx.success = false
+						reqCtx.errorMsg = truncateErrorMessage(err.Error())
+					}
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return true, "", 0, nil
+				}
+
+				log.Printf("[Messages-Convert] ConvertToProviderRequest 失败: %v", err)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(err.Error())
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert request"})
+				return true, "", 0, nil
 			}
 
 			resp, err := common.SendRequest(providerReq, upstream, envCfg, claudeReq.Stream)
@@ -596,10 +641,22 @@ func handleSingleChannel(
 			providerReq, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
 
 			if err != nil {
-				lastError = err
-				failedKeys[apiKey] = true
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-				continue
+				if asClientError(err) != nil {
+					if reqCtx != nil {
+						reqCtx.success = false
+						reqCtx.errorMsg = truncateErrorMessage(err.Error())
+					}
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+
+				log.Printf("[Messages-Convert] ConvertToProviderRequest 失败: %v", err)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(err.Error())
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert request"})
+				return
 			}
 
 			resp, err := common.SendRequest(providerReq, upstream, envCfg, claudeReq.Stream)

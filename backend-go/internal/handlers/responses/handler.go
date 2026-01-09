@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -71,6 +72,50 @@ func truncateErrorMessage(msg string) string {
 		return msg
 	}
 	return msg[:maxLen] + "..."
+}
+
+type ClientError struct {
+	Err error
+}
+
+func (e *ClientError) Error() string {
+	if e == nil || e.Err == nil {
+		return "client error"
+	}
+	return e.Err.Error()
+}
+
+func (e *ClientError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func asClientError(err error) *ClientError {
+	if err == nil {
+		return nil
+	}
+
+	var syntaxErr *json.SyntaxError
+	var unmarshalTypeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) || errors.As(err, &unmarshalTypeErr) {
+		return &ClientError{Err: err}
+	}
+
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "无效的 previous_response_id"):
+		return &ClientError{Err: err}
+	case strings.Contains(msg, "不支持的 input 类型"):
+		return &ClientError{Err: err}
+	case strings.Contains(msg, "未知的 item type"):
+		return &ClientError{Err: err}
+	case strings.Contains(msg, "text 类型的 content 不能为空"):
+		return &ClientError{Err: err}
+	default:
+		return nil
+	}
 }
 
 type Handler struct {
@@ -412,9 +457,22 @@ func tryChannelWithAllKeys(
 			providerReq, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
 
 			if err != nil {
-				failedKeys[apiKey] = true
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, true)
-				continue
+				if asClientError(err) != nil {
+					if reqCtx != nil {
+						reqCtx.success = false
+						reqCtx.errorMsg = truncateErrorMessage(err.Error())
+					}
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return true, "", 0, nil, nil
+				}
+
+				log.Printf("[Responses-Convert] ConvertToProviderRequest 失败: %v", err)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(err.Error())
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert request"})
+				return true, "", 0, nil, nil
 			}
 
 			resp, err := common.SendRequest(providerReq, upstream, envCfg, responsesReq.Stream)
@@ -593,10 +651,22 @@ func handleSingleChannel(
 			providerReq, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
 
 			if err != nil {
-				lastError = err
-				failedKeys[apiKey] = true
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, true)
-				continue
+				if asClientError(err) != nil {
+					if reqCtx != nil {
+						reqCtx.success = false
+						reqCtx.errorMsg = truncateErrorMessage(err.Error())
+					}
+					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+					return
+				}
+
+				log.Printf("[Responses-Convert] ConvertToProviderRequest 失败: %v", err)
+				if reqCtx != nil {
+					reqCtx.success = false
+					reqCtx.errorMsg = truncateErrorMessage(err.Error())
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert request"})
+				return
 			}
 
 			resp, err := common.SendRequest(providerReq, upstream, envCfg, responsesReq.Stream)

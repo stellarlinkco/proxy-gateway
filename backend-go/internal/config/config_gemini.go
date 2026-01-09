@@ -23,12 +23,12 @@ func (cm *ConfigManager) GetCurrentGeminiUpstream() (*UpstreamConfig, error) {
 	for i := range cm.config.GeminiUpstream {
 		status := cm.config.GeminiUpstream[i].Status
 		if status == "" || status == "active" {
-			return &cm.config.GeminiUpstream[i], nil
+			return cm.config.GeminiUpstream[i].Clone(), nil
 		}
 	}
 
 	// 没有 active 渠道，回退到第一个渠道
-	return &cm.config.GeminiUpstream[0], nil
+	return cm.config.GeminiUpstream[0].Clone(), nil
 }
 
 // AddGeminiUpstream 添加 Gemini 上游

@@ -23,12 +23,12 @@ func (cm *ConfigManager) GetCurrentResponsesUpstream() (*UpstreamConfig, error) 
 	for i := range cm.config.ResponsesUpstream {
 		status := cm.config.ResponsesUpstream[i].Status
 		if status == "" || status == "active" {
-			return &cm.config.ResponsesUpstream[i], nil
+			return cm.config.ResponsesUpstream[i].Clone(), nil
 		}
 	}
 
 	// 没有 active 渠道，回退到第一个渠道
-	return &cm.config.ResponsesUpstream[0], nil
+	return cm.config.ResponsesUpstream[0].Clone(), nil
 }
 
 // AddResponsesUpstream 添加 Responses 上游

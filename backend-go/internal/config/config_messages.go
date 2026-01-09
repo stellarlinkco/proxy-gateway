@@ -25,12 +25,12 @@ func (cm *ConfigManager) GetCurrentUpstream() (*UpstreamConfig, error) {
 	for i := range cm.config.Upstream {
 		status := cm.config.Upstream[i].Status
 		if status == "" || status == "active" {
-			return &cm.config.Upstream[i], nil
+			return cm.config.Upstream[i].Clone(), nil
 		}
 	}
 
 	// 没有 active 渠道，回退到第一个渠道
-	return &cm.config.Upstream[0], nil
+	return cm.config.Upstream[0].Clone(), nil
 }
 
 // AddUpstream 添加上游

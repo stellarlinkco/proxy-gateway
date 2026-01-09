@@ -245,7 +245,10 @@ func TestResponsesHandler_SingleChannel_InvalidJSONCausesConvertError(t *testing
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
+	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "解析请求失败") {
+		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }

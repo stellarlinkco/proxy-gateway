@@ -64,34 +64,48 @@ func (cm *ConfigManager) loadConfig() error {
 		return err
 	}
 
-	if err := json.Unmarshal(data, &cm.config); err != nil {
+	// 关键：不要对 cm.config 做就地 Unmarshal。
+	// 热重载期间，可能仍有并发请求持有旧快照里的 slice/map 引用；
+	// 就地写入会直接改动旧内存，触发数据竞争。
+	var newConfig Config
+	if err := json.Unmarshal(data, &newConfig); err != nil {
 		return err
 	}
 
 	// 兼容旧配置：检查 FuzzyModeEnabled 字段是否存在
 	// 如果不存在，默认设为 true（新功能默认启用）
-	needSaveDefaults := cm.applyConfigDefaults(data)
+	needSaveDefaults := cm.applyConfigDefaults(&newConfig, data)
 
 	// 兼容旧格式：检测是否需要迁移
-	needMigration := cm.migrateOldFormat()
+	needMigration := cm.migrateOldFormat(&newConfig)
 
 	// 如果有默认值迁移或格式迁移，保存配置
+	saved := false
 	if needSaveDefaults || needMigration {
-		if err := cm.saveConfigLocked(cm.config); err != nil {
+		if err := cm.saveConfigLocked(newConfig); err != nil {
 			log.Printf("[Config-Migration] 警告: 保存迁移后的配置失败: %v", err)
 			return err
 		}
+		saved = true
+		newConfig = cm.config
 		if needMigration {
 			log.Printf("[Config-Migration] 配置迁移完成")
 		}
 	}
 
 	// 自检：没有配置 key 的渠道自动暂停
-	if cm.validateChannelKeys() {
-		if err := cm.saveConfigLocked(cm.config); err != nil {
+	if cm.validateChannelKeys(&newConfig) {
+		if err := cm.saveConfigLocked(newConfig); err != nil {
 			log.Printf("[Config-Validate] 警告: 保存自检后的配置失败: %v", err)
 			return err
 		}
+		saved = true
+		newConfig = cm.config
+	}
+
+	// 未触发 saveConfigLocked 时，只更新内存快照（一次性替换）。
+	if !saved {
+		cm.config = newConfig
 	}
 
 	return nil
@@ -121,17 +135,17 @@ func (cm *ConfigManager) createDefaultConfig() error {
 // applyConfigDefaults 应用配置默认值
 // rawJSON: 原始 JSON 数据，用于检测字段是否存在
 // 返回: 是否有字段需要迁移（需要保存配置）
-func (cm *ConfigManager) applyConfigDefaults(rawJSON []byte) bool {
+func (cm *ConfigManager) applyConfigDefaults(cfg *Config, rawJSON []byte) bool {
 	needSave := false
 
-	if cm.config.LoadBalance == "" {
-		cm.config.LoadBalance = "failover"
+	if cfg.LoadBalance == "" {
+		cfg.LoadBalance = "failover"
 	}
-	if cm.config.ResponsesLoadBalance == "" {
-		cm.config.ResponsesLoadBalance = cm.config.LoadBalance
+	if cfg.ResponsesLoadBalance == "" {
+		cfg.ResponsesLoadBalance = cfg.LoadBalance
 	}
-	if cm.config.GeminiLoadBalance == "" {
-		cm.config.GeminiLoadBalance = "failover"
+	if cfg.GeminiLoadBalance == "" {
+		cfg.GeminiLoadBalance = "failover"
 	}
 
 	// FuzzyModeEnabled 默认值处理：
@@ -141,7 +155,7 @@ func (cm *ConfigManager) applyConfigDefaults(rawJSON []byte) bool {
 	if err := json.Unmarshal(rawJSON, &rawMap); err == nil {
 		if _, exists := rawMap["fuzzyModeEnabled"]; !exists {
 			// 字段不存在，设为默认值 true
-			cm.config.FuzzyModeEnabled = true
+			cfg.FuzzyModeEnabled = true
 			needSave = true
 			log.Printf("[Config-Migration] FuzzyModeEnabled 字段不存在，设为默认值 true")
 		}
@@ -151,16 +165,16 @@ func (cm *ConfigManager) applyConfigDefaults(rawJSON []byte) bool {
 }
 
 // migrateOldFormat 迁移旧格式配置，返回是否有迁移
-func (cm *ConfigManager) migrateOldFormat() bool {
+func (cm *ConfigManager) migrateOldFormat(cfg *Config) bool {
 	needMigration := false
 
 	// 迁移 Messages 渠道
-	if cm.migrateUpstreams(cm.config.Upstream, cm.config.CurrentUpstream, "Messages") {
+	if cm.migrateUpstreams(cfg.Upstream, cfg.CurrentUpstream, "Messages") {
 		needMigration = true
 	}
 
 	// 迁移 Responses 渠道
-	if cm.migrateUpstreams(cm.config.ResponsesUpstream, cm.config.CurrentResponsesUpstream, "Responses") {
+	if cm.migrateUpstreams(cfg.ResponsesUpstream, cfg.CurrentResponsesUpstream, "Responses") {
 		needMigration = true
 	}
 
@@ -206,12 +220,12 @@ func (cm *ConfigManager) migrateUpstreams(upstreams []UpstreamConfig, currentIdx
 // validateChannelKeys 自检渠道密钥配置
 // 没有配置 API key 的渠道，即使状态为 active 也应暂停
 // 返回 true 表示有配置被修改，需要保存
-func (cm *ConfigManager) validateChannelKeys() bool {
+func (cm *ConfigManager) validateChannelKeys(cfg *Config) bool {
 	modified := false
 
 	// 检查 Messages 渠道
-	for i := range cm.config.Upstream {
-		upstream := &cm.config.Upstream[i]
+	for i := range cfg.Upstream {
+		upstream := &cfg.Upstream[i]
 		status := upstream.Status
 		if status == "" {
 			status = "active"
@@ -226,8 +240,8 @@ func (cm *ConfigManager) validateChannelKeys() bool {
 	}
 
 	// 检查 Responses 渠道
-	for i := range cm.config.ResponsesUpstream {
-		upstream := &cm.config.ResponsesUpstream[i]
+	for i := range cfg.ResponsesUpstream {
+		upstream := &cfg.ResponsesUpstream[i]
 		status := upstream.Status
 		if status == "" {
 			status = "active"
@@ -242,8 +256,8 @@ func (cm *ConfigManager) validateChannelKeys() bool {
 	}
 
 	// 检查 Gemini 渠道
-	for i := range cm.config.GeminiUpstream {
-		upstream := &cm.config.GeminiUpstream[i]
+	for i := range cfg.GeminiUpstream {
+		upstream := &cfg.GeminiUpstream[i]
 		status := upstream.Status
 		if status == "" {
 			status = "active"
