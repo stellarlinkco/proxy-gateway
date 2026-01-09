@@ -1,6 +1,6 @@
 # Claude / Codex / Gemini API Proxy
 
-[![GitHub release](https://img.shields.io/github/v/release/BenedictKing/claude-proxy)](https://github.com/stellarlinkco/proxy-gateway/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/stellarlinkco/proxy-gateway)](https://github.com/stellarlinkco/proxy-gateway/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 一个高性能的 Claude API 代理服务器，支持多种上游 AI 服务提供商（Claude、Codex、Gemini），提供负载均衡、多 API 密钥管理和统一入口访问。
