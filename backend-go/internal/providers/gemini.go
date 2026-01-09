@@ -88,8 +88,8 @@ func (p *GeminiProvider) convertToGeminiRequest(claudeReq *types.ClaudeRequest, 
 		genConfig["maxOutputTokens"] = claudeReq.MaxTokens
 	}
 
-	if claudeReq.Temperature > 0 {
-		genConfig["temperature"] = claudeReq.Temperature
+	if claudeReq.Temperature != nil {
+		genConfig["temperature"] = *claudeReq.Temperature
 	}
 
 	if len(genConfig) > 0 {

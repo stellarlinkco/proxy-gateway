@@ -2,14 +2,24 @@ package types
 
 // ClaudeRequest Claude 请求结构
 type ClaudeRequest struct {
-	Model       string                 `json:"model"`
-	Messages    []ClaudeMessage        `json:"messages"`
-	System      interface{}            `json:"system,omitempty"` // string 或 content 数组
-	MaxTokens   int                    `json:"max_tokens,omitempty"`
-	Temperature float64                `json:"temperature,omitempty"`
-	Stream      bool                   `json:"stream,omitempty"`
-	Tools       []ClaudeTool           `json:"tools,omitempty"`
-	Metadata    map[string]interface{} `json:"metadata,omitempty"` // Claude Code CLI 等客户端发送的元数据
+	Model    string          `json:"model"`    // 模型名
+	Messages []ClaudeMessage `json:"messages"` // 对话消息列表
+
+	System interface{} `json:"system,omitempty"` // 系统提示：string 或 content 数组（Claude Messages API 独立参数）
+
+	MaxTokens     int      `json:"max_tokens,omitempty"`     // 最大输出 tokens
+	Temperature   *float64 `json:"temperature,omitempty"`    // 温度；用指针区分 0 与未设置
+	TopP          *float64 `json:"top_p,omitempty"`          // nucleus sampling（top_p）
+	TopK          *int     `json:"top_k,omitempty"`          // top-k sampling（top_k）
+	StopSequences []string `json:"stop_sequences,omitempty"` // 停止序列（Claude 使用 stop_sequences）
+
+	Stream bool `json:"stream,omitempty"` // 是否使用 SSE 流式输出
+
+	Tools      []ClaudeTool `json:"tools,omitempty"`       // 工具定义
+	ToolChoice any          `json:"tool_choice,omitempty"` // 工具选择策略（auto/tool/none 等，结构随上游而变）
+	Thinking   any          `json:"thinking,omitempty"`    // 推理/思考配置（如 Claude 3.5+ 的 thinking 参数）
+
+	Metadata map[string]interface{} `json:"metadata,omitempty"` // Claude Code CLI 等客户端发送的元数据
 }
 
 // ClaudeMessage Claude 消息
@@ -26,8 +36,11 @@ type CacheControl struct {
 
 // ClaudeContent Claude 内容块
 type ClaudeContent struct {
-	Type         string        `json:"type"` // text, tool_use, tool_result
-	Text         string        `json:"text,omitempty"`
+	Type string `json:"type"` // text, tool_use, tool_result
+	Text string `json:"text,omitempty"`
+	// thinking / redacted_thinking 等扩展块：不同 Anthropic 版本/代理实现可能是 string 或 object，这里用 any 保持透传。
+	Thinking     any           `json:"thinking,omitempty"`
+	Signature    string        `json:"signature,omitempty"`
 	ID           string        `json:"id,omitempty"`
 	Name         string        `json:"name,omitempty"`
 	Input        interface{}   `json:"input,omitempty"`
@@ -45,12 +58,14 @@ type ClaudeTool struct {
 
 // ClaudeResponse Claude 响应
 type ClaudeResponse struct {
-	ID         string          `json:"id"`
-	Type       string          `json:"type"`
-	Role       string          `json:"role"`
-	Content    []ClaudeContent `json:"content"`
-	StopReason string          `json:"stop_reason,omitempty"`
-	Usage      *Usage          `json:"usage,omitempty"`
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	Role         string          `json:"role"`
+	Content      []ClaudeContent `json:"content"`
+	StopReason   string          `json:"stop_reason,omitempty"`
+	Model        string          `json:"model,omitempty"`         // Claude API 标准响应字段：实际使用的模型
+	StopSequence string          `json:"stop_sequence,omitempty"` // Claude API 标准响应字段：触发停止的序列
+	Usage        *Usage          `json:"usage,omitempty"`
 }
 
 // OpenAIRequest OpenAI 请求结构

@@ -37,10 +37,12 @@ func (p *OpenAIProvider) ConvertToProviderRequest(c *gin.Context, upstream *conf
 
 	// --- 复用旧的转换逻辑 ---
 	openaiReq := &types.OpenAIRequest{
-		Model:       config.RedirectModel(claudeReq.Model, upstream),
-		Messages:    p.convertMessages(&claudeReq),
-		Stream:      claudeReq.Stream,
-		Temperature: claudeReq.Temperature,
+		Model:    config.RedirectModel(claudeReq.Model, upstream),
+		Messages: p.convertMessages(&claudeReq),
+		Stream:   claudeReq.Stream,
+	}
+	if claudeReq.Temperature != nil {
+		openaiReq.Temperature = *claudeReq.Temperature
 	}
 
 	if claudeReq.MaxTokens > 0 {

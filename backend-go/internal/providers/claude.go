@@ -29,25 +29,31 @@ func (p *ClaudeProvider) ConvertToProviderRequest(c *gin.Context, upstream *conf
 		if err != nil {
 			return nil, nil, err
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // 恢复body
+		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-		var claudeReq types.ClaudeRequest
-		if err := json.Unmarshal(bodyBytes, &claudeReq); err != nil {
+		// 真正的透传：使用 map 保留所有原始字段，只在存在 model 字段时进行重定向修改
+		dec := json.NewDecoder(bytes.NewReader(bodyBytes))
+		dec.UseNumber() // 避免 float64 精度问题
+		var reqMap map[string]any
+		if err := dec.Decode(&reqMap); err != nil {
 			return nil, bodyBytes, err
 		}
-		claudeReq.Model = config.RedirectModel(claudeReq.Model, upstream)
 
-		bodyBytes, err = json.Marshal(claudeReq)
+		if model, ok := reqMap["model"].(string); ok {
+			reqMap["model"] = config.RedirectModel(model, upstream)
+		}
+
+		bodyBytes, err = json.Marshal(reqMap)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		// 如果不需要模型重定向，则直接从原始请求中读取body用于日志和请求转发
+		// 不需要模型重定向，直接透传
 		bodyBytes, err = io.ReadAll(c.Request.Body)
 		if err != nil {
 			return nil, nil, err
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes)) // 恢复body
+		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
 	// 构建目标URL
