@@ -2,7 +2,7 @@
 name: github-release
 description: 发布 GitHub Release，从 CHANGELOG 生成发布公告并更新 Draft Release (project)
 version: 1.2.0
-author: https://github.com/BenedictKing/claude-proxy/
+author: https://github.com/stellarlinkco/proxy-gateway/
 allowed-tools: Bash, Read
 ---
 
@@ -89,7 +89,7 @@ cat CHANGELOG.md
 
 ---
 
-**Full Changelog**: https://github.com/BenedictKing/claude-proxy/compare/v2.3.5...v2.3.7
+**Full Changelog**: https://github.com/stellarlinkco/proxy-gateway/compare/v2.3.5...v2.3.7
 ```
 
 **注意事项**：
@@ -163,7 +163,7 @@ gh release view <tag> --json url,publishedAt
 
 版本: v2.3.7
 状态: ✅ 已发布
-链接: https://github.com/BenedictKing/claude-proxy/releases/tag/v2.3.7
+链接: https://github.com/stellarlinkco/proxy-gateway/releases/tag/v2.3.7
 
 已清理的 Draft: v2.3.5, v2.3.6（已合并到 v2.3.7 发布公告）
 
@@ -180,7 +180,7 @@ gh release view <tag> --json url,publishedAt
 
 ---
 
-**Full Changelog**: https://github.com/BenedictKing/claude-proxy/compare/v2.3.5...v2.3.7
+**Full Changelog**: https://github.com/stellarlinkco/proxy-gateway/compare/v2.3.5...v2.3.7
 ---
 ```
 

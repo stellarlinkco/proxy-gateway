@@ -1,6 +1,6 @@
 # Claude / Codex / Gemini API Proxy
 
-[![GitHub release](https://img.shields.io/github/v/release/BenedictKing/claude-proxy)](https://github.com/BenedictKing/claude-proxy/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/BenedictKing/claude-proxy)](https://github.com/stellarlinkco/proxy-gateway/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 一个高性能的 Claude API 代理服务器，支持多种上游 AI 服务提供商（Claude、Codex、Gemini），提供负载均衡、多 API 密钥管理和统一入口访问。
@@ -89,7 +89,7 @@
 
 **无需安装任何依赖，下载即用**
 
-前往 [Releases 页面](https://github.com/BenedictKing/claude-proxy/releases/latest) 下载适合您系统的版本：
+前往 [Releases 页面](https://github.com/stellarlinkco/proxy-gateway/releases/latest) 下载适合您系统的版本：
 
 | 操作系统 | 架构 | 文件名 |
 |---------|------|--------|
@@ -142,7 +142,7 @@ docker run -d \
 
 ```bash
 # 1. 克隆项目（仅需 docker-compose.yml）
-git clone https://github.com/BenedictKing/claude-proxy
+git clone https://github.com/stellarlinkco/proxy-gateway
 cd claude-proxy
 
 # 2. 修改 docker-compose.yml 中的 PROXY_ACCESS_KEY
@@ -167,7 +167,7 @@ docker-compose up -d
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/BenedictKing/claude-proxy
+git clone https://github.com/stellarlinkco/proxy-gateway
 cd claude-proxy
 
 # 2. 配置环境变量

@@ -2,7 +2,7 @@
 name: codex-review
 description: 调用 codex 命令行进行代码审核，自动收集当前文件修改和任务状态一并发送；工作区干净时自动审核最新提交 (user)
 version: 1.5.0
-author: https://github.com/BenedictKing/claude-proxy/
+author: https://github.com/stellarlinkco/proxy-gateway/
 allowed-tools: Bash, Read, Glob, Write, Edit
 ---
 
