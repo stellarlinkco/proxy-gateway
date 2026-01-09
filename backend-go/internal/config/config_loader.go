@@ -22,6 +22,7 @@ func NewConfigManager(configFile string) (*ConfigManager, error) {
 	cm := &ConfigManager{
 		configFile:      configFile,
 		failedKeysCache: make(map[string]*FailedKey),
+		keyIndex:        make(map[string]int),
 		keyRecoveryTime: keyRecoveryTime,
 		maxFailureCount: maxFailureCount,
 		stopChan:        make(chan struct{}),
@@ -38,7 +39,11 @@ func NewConfigManager(configFile string) (*ConfigManager, error) {
 	}
 
 	// 启动定期清理
-	go cm.cleanupExpiredFailures()
+	cm.wg.Add(1)
+	go func() {
+		defer cm.wg.Done()
+		cm.cleanupExpiredFailures()
+	}()
 
 	return cm, nil
 }
@@ -337,7 +342,9 @@ func (cm *ConfigManager) startWatcher() error {
 
 	cm.watcher = watcher
 
+	cm.wg.Add(1)
 	go func() {
+		defer cm.wg.Done()
 		for {
 			select {
 			case <-cm.stopChan:
@@ -345,6 +352,11 @@ func (cm *ConfigManager) startWatcher() error {
 			case event, ok := <-watcher.Events:
 				if !ok {
 					return
+				}
+				select {
+				case <-cm.stopChan:
+					return
+				default:
 				}
 				if event.Op&fsnotify.Write == fsnotify.Write {
 					log.Printf("[Config-Watcher] 检测到配置文件变化，重载配置...")
@@ -357,6 +369,11 @@ func (cm *ConfigManager) startWatcher() error {
 			case err, ok := <-watcher.Errors:
 				if !ok {
 					return
+				}
+				select {
+				case <-cm.stopChan:
+					return
+				default:
 				}
 				log.Printf("[Config-Watcher] 警告: 文件监听错误: %v", err)
 			}
@@ -379,6 +396,9 @@ func (cm *ConfigManager) Close() error {
 		if cm.watcher != nil {
 			closeErr = cm.watcher.Close()
 		}
+
+		// 等待后台 goroutine 退出，避免 Close 后仍写入备份/配置文件
+		cm.wg.Wait()
 	})
 	return closeErr
 }

@@ -72,6 +72,11 @@ func (cm *ConfigManager) UpdateGeminiUpstream(index int, updates UpstreamUpdate)
 	}
 	if updates.BaseURL != nil {
 		upstream.BaseURL = *updates.BaseURL
+		// 当 BaseURL 被更新且 BaseURLs 未被显式设置时，清空 BaseURLs 保持一致性
+		// 避免出现 baseUrl 和 baseUrls[0] 不一致的情况
+		if updates.BaseURLs == nil {
+			upstream.BaseURLs = nil
+		}
 	}
 	if updates.BaseURLs != nil {
 		upstream.BaseURLs = deduplicateBaseURLs(updates.BaseURLs)
@@ -205,9 +210,9 @@ func (cm *ConfigManager) RemoveGeminiAPIKey(index int, apiKey string) error {
 	return nil
 }
 
-// GetNextGeminiAPIKey 获取下一个 Gemini API 密钥（纯 failover 模式）
+// GetNextGeminiAPIKey 获取下一个 Gemini API 密钥（Key 轮询）
 func (cm *ConfigManager) GetNextGeminiAPIKey(upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
-	return cm.GetNextAPIKey(upstream, failedKeys)
+	return cm.getNextAPIKeyRoundRobin("gemini", upstream, failedKeys)
 }
 
 // MoveGeminiAPIKeyToTop 将指定 Gemini 渠道的 API 密钥移到最前面

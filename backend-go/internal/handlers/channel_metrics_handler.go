@@ -24,8 +24,8 @@ func GetChannelMetricsWithConfig(metricsManager *metrics.MetricsManager, cfgMana
 
 		result := make([]gin.H, 0, len(upstreams))
 		for i, upstream := range upstreams {
-			// 使用新的聚合方法获取渠道指标
-			resp := metricsManager.ToResponse(i, upstream.BaseURL, upstream.APIKeys, 0)
+			// 使用多 URL 聚合方法获取渠道指标（支持 failover 多端点场景）
+			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0)
 
 			item := gin.H{
 				"channelIndex":        i,
@@ -358,7 +358,8 @@ func GetChannelMetricsHistory(metricsManager *metrics.MetricsManager, cfgManager
 
 		result := make([]MetricsHistoryResponse, 0, len(upstreams))
 		for i, upstream := range upstreams {
-			dataPoints, warning := metricsManager.GetHistoricalStatsWithWarning(upstream.BaseURL, upstream.APIKeys, duration, interval)
+			// 使用多 URL 聚合方法获取历史数据（支持 failover 多端点场景）
+			dataPoints, warning := metricsManager.GetHistoricalStatsMultiURLWithWarning(upstream.GetAllBaseURLs(), upstream.APIKeys, duration, interval)
 
 			result = append(result, MetricsHistoryResponse{
 				ChannelIndex: i,
@@ -480,7 +481,8 @@ func GetChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, cfgMana
 
 		// 获取所有 Key 的使用信息并筛选（最多显示 10 个）
 		const maxDisplayKeys = 10
-		allKeyInfos := metricsManager.GetChannelKeyUsageInfo(upstream.BaseURL, upstream.APIKeys)
+		// 使用多 URL 聚合方法获取 Key 使用信息（支持 failover 多端点场景）
+		allKeyInfos := metricsManager.GetChannelKeyUsageInfoMultiURL(upstream.GetAllBaseURLs(), upstream.APIKeys)
 		displayKeys := metrics.SelectTopKeys(allKeyInfos, maxDisplayKeys)
 
 		// 构建响应
@@ -493,7 +495,8 @@ func GetChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, cfgMana
 		var warning string
 		// 为筛选后的 Key 获取历史数据
 		for i, keyInfo := range displayKeys {
-			dataPoints, w := metricsManager.GetKeyHistoricalStatsWithWarning(upstream.BaseURL, keyInfo.APIKey, duration, interval)
+			// 使用多 URL 聚合方法获取单个 Key 的历史数据（支持 failover 多端点场景）
+			dataPoints, w := metricsManager.GetKeyHistoricalStatsMultiURLWithWarning(upstream.GetAllBaseURLs(), keyInfo.APIKey, duration, interval)
 			if warning == "" {
 				warning = w
 			}
@@ -575,7 +578,7 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 		// 2. 构建 metrics 数据
 		metricsResult := make([]gin.H, 0, len(upstreams))
 		for i, upstream := range upstreams {
-			resp := metricsManager.ToResponse(i, upstream.BaseURL, upstream.APIKeys, 0)
+			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0)
 
 			item := gin.H{
 				"channelIndex":        i,
@@ -674,7 +677,8 @@ func GetGeminiChannelMetricsHistory(metricsManager *metrics.MetricsManager, cfgM
 
 		result := make([]MetricsHistoryResponse, 0, len(upstreams))
 		for i, upstream := range upstreams {
-			dataPoints := metricsManager.GetHistoricalStats(upstream.BaseURL, upstream.APIKeys, duration, interval)
+			// 使用多 URL 聚合方法获取历史数据（支持 failover 多端点场景）
+			dataPoints := metricsManager.GetHistoricalStatsMultiURL(upstream.GetAllBaseURLs(), upstream.APIKeys, duration, interval)
 
 			result = append(result, MetricsHistoryResponse{
 				ChannelIndex: i,
@@ -763,7 +767,8 @@ func GetGeminiChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, c
 
 		// 获取所有 Key 的使用信息并筛选（最多显示 10 个）
 		const maxDisplayKeys = 10
-		allKeyInfos := metricsManager.GetChannelKeyUsageInfo(upstream.BaseURL, upstream.APIKeys)
+		// 使用多 URL 聚合方法获取 Key 使用信息（支持 failover 多端点场景）
+		allKeyInfos := metricsManager.GetChannelKeyUsageInfoMultiURL(upstream.GetAllBaseURLs(), upstream.APIKeys)
 		displayKeys := metrics.SelectTopKeys(allKeyInfos, maxDisplayKeys)
 
 		// 构建响应
@@ -775,7 +780,8 @@ func GetGeminiChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, c
 
 		// 为筛选后的 Key 获取历史数据
 		for i, keyInfo := range displayKeys {
-			dataPoints := metricsManager.GetKeyHistoricalStats(upstream.BaseURL, keyInfo.APIKey, duration, interval)
+			// 使用多 URL 聚合方法获取单个 Key 的历史数据（支持 failover 多端点场景）
+			dataPoints := metricsManager.GetKeyHistoricalStatsMultiURL(upstream.GetAllBaseURLs(), keyInfo.APIKey, duration, interval)
 
 			// 获取 Key 的颜色
 			color := keyColors[i%len(keyColors)]
@@ -802,8 +808,8 @@ func GetGeminiChannelMetrics(metricsManager *metrics.MetricsManager, cfgManager 
 
 		result := make([]gin.H, 0, len(upstreams))
 		for i, upstream := range upstreams {
-			// 使用新的聚合方法获取渠道指标
-			resp := metricsManager.ToResponse(i, upstream.BaseURL, upstream.APIKeys, 0)
+			// 使用多 URL 聚合方法获取渠道指标（支持 failover 多端点场景）
+			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0)
 
 			item := gin.H{
 				"channelIndex":        i,

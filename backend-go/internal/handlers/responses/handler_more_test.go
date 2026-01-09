@@ -32,17 +32,33 @@ func TestExtractResponsesUsageFromMap_ClaudeCacheAndTTL(t *testing.T) {
 
 func TestExtractResponsesUsageFromMap_OpenAICachedTokens(t *testing.T) {
 	u := extractResponsesUsageFromMap(map[string]interface{}{
-		"input_tokens":  float64(0),
+		"input_tokens":  float64(240),
 		"output_tokens": float64(0),
 		"input_tokens_details": map[string]interface{}{
-			"cached_tokens": float64(42),
+			"cached_tokens": float64(220),
 		},
 	})
-	if u.CacheReadInputTokens != 42 {
+	if u.InputTokens != 20 {
+		t.Fatalf("InputTokens=%d", u.InputTokens)
+	}
+	if u.CacheReadInputTokens != 220 {
 		t.Fatalf("CacheReadInputTokens=%d", u.CacheReadInputTokens)
 	}
 	if u.HasClaudeCache {
 		t.Fatalf("expected HasClaudeCache false for OpenAI cached_tokens")
+	}
+
+	u2 := extractResponsesUsageFromMap(map[string]interface{}{
+		"input_tokens": float64(10),
+		"input_tokens_details": map[string]interface{}{
+			"cached_tokens": float64(42),
+		},
+	})
+	if u2.InputTokens != 0 {
+		t.Fatalf("InputTokens=%d", u2.InputTokens)
+	}
+	if u2.CacheReadInputTokens != 42 {
+		t.Fatalf("CacheReadInputTokens=%d", u2.CacheReadInputTokens)
 	}
 }
 

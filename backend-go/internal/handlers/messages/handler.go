@@ -274,13 +274,12 @@ func handleMultiChannel(
 				channelIndex, upstream.Name, selection.Reason, channelAttempt+1, maxChannelAttempts)
 		}
 
-		success, successKey, successBaseURLIdx, failoverErr := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, upstream, channelIndex, bodyBytes, claudeReq, startTime, billingHandler, billingCtx, reqCtx)
+		success, _, _, failoverErr := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, upstream, channelIndex, bodyBytes, claudeReq, startTime, billingHandler, billingCtx, reqCtx)
 
 		if success {
-			if successKey != "" {
-				channelScheduler.RecordSuccess(upstream.GetAllBaseURLs()[successBaseURLIdx], successKey, false)
+			if selection.Reason == "trace_affinity" {
+				channelScheduler.UpdateTraceAffinity(userID)
 			}
-			channelScheduler.SetTraceAffinity(userID, channelIndex)
 			return
 		}
 
@@ -464,7 +463,7 @@ func tryChannelWithAllKeys(
 			channelScheduler.MarkURLSuccess(channelIndex, currentBaseURL)
 
 			if claudeReq.Stream {
-				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
+				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstreamCopy, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
 				if reqCtx != nil {
 					reqCtx.usage = usage
 					reqCtx.costCents = costCents
@@ -474,7 +473,7 @@ func tryChannelWithAllKeys(
 					}
 				}
 			} else {
-				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstream, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
+				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstreamCopy, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
 			}
 			return true, apiKey, originalIdx, nil
 		}
@@ -696,9 +695,8 @@ func handleSingleChannel(
 				}
 			}
 
-			channelScheduler.RecordSuccess(currentBaseURL, apiKey, false)
 			if claudeReq.Stream {
-				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstream, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
+				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstreamCopy, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
 				if reqCtx != nil {
 					reqCtx.usage = usage
 					reqCtx.costCents = costCents
@@ -708,7 +706,7 @@ func handleSingleChannel(
 					}
 				}
 			} else {
-				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstream, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
+				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstreamCopy, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
 			}
 			return
 		}

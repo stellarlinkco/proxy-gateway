@@ -72,6 +72,11 @@ func (cm *ConfigManager) UpdateResponsesUpstream(index int, updates UpstreamUpda
 	}
 	if updates.BaseURL != nil {
 		upstream.BaseURL = *updates.BaseURL
+		// 当 BaseURL 被更新且 BaseURLs 未被显式设置时，清空 BaseURLs 保持一致性
+		// 避免出现 baseUrl 和 baseUrls[0] 不一致的情况
+		if updates.BaseURLs == nil {
+			upstream.BaseURLs = nil
+		}
 	}
 	if updates.BaseURLs != nil {
 		upstream.BaseURLs = deduplicateBaseURLs(updates.BaseURLs)
@@ -205,9 +210,9 @@ func (cm *ConfigManager) RemoveResponsesAPIKey(index int, apiKey string) error {
 	return nil
 }
 
-// GetNextResponsesAPIKey 获取下一个 API 密钥（Responses 负载均衡 - 纯 failover 模式）
+// GetNextResponsesAPIKey 获取下一个 API 密钥（Responses Key 轮询）
 func (cm *ConfigManager) GetNextResponsesAPIKey(upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
-	return cm.GetNextAPIKey(upstream, failedKeys)
+	return cm.getNextAPIKeyRoundRobin("responses", upstream, failedKeys)
 }
 
 // SetResponsesLoadBalance 设置 Responses 负载均衡策略

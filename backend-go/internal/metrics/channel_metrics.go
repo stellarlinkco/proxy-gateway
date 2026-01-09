@@ -64,6 +64,14 @@ type TimeWindowStats struct {
 	SuccessCount int64   `json:"successCount"`
 	FailureCount int64   `json:"failureCount"`
 	SuccessRate  float64 `json:"successRate"`
+	// Token 统计（按时间窗口聚合）
+	InputTokens         int64 `json:"inputTokens,omitempty"`
+	OutputTokens        int64 `json:"outputTokens,omitempty"`
+	CacheCreationTokens int64 `json:"cacheCreationTokens,omitempty"`
+	CacheReadTokens     int64 `json:"cacheReadTokens,omitempty"`
+	// CacheHitRate 缓存命中率（Token口径），范围 0-100
+	// 定义：cacheReadTokens / (cacheReadTokens + inputTokens) * 100
+	CacheHitRate float64 `json:"cacheHitRate,omitempty"`
 }
 
 // MetricsManager 指标管理器
@@ -296,7 +304,11 @@ func (m *MetricsManager) RecordSuccessWithUsage(baseURL, apiKey string, usage *t
 	if usage != nil {
 		inputTokens = int64(usage.InputTokens)
 		outputTokens = int64(usage.OutputTokens)
+		// cache_creation_input_tokens 有时不会返回（只返回 5m/1h 细分字段），这里做兜底汇总。
 		cacheCreationTokens = int64(usage.CacheCreationInputTokens)
+		if cacheCreationTokens <= 0 {
+			cacheCreationTokens = int64(usage.CacheCreation5mInputTokens + usage.CacheCreation1hInputTokens)
+		}
 		cacheReadTokens = int64(usage.CacheReadInputTokens)
 	}
 
@@ -664,6 +676,78 @@ func (m *MetricsManager) GetChannelKeyUsageInfo(baseURL string, apiKeys []string
 	return infos
 }
 
+// GetChannelKeyUsageInfoMultiURL 获取渠道 Key 使用信息（支持多 URL 聚合）
+func (m *MetricsManager) GetChannelKeyUsageInfoMultiURL(baseURLs []string, apiKeys []string) []KeyUsageInfo {
+	if len(baseURLs) == 0 {
+		return []KeyUsageInfo{}
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	infos := make([]KeyUsageInfo, 0, len(apiKeys))
+
+	for _, apiKey := range apiKeys {
+		var keyMask string
+		var requestCount int64
+		var lastUsedAt *time.Time
+		hasMetrics := false
+
+		// 遍历所有 BaseURL 聚合同一 Key 的指标
+		for _, baseURL := range baseURLs {
+			metricsKey := generateMetricsKey(baseURL, apiKey)
+			if metrics, exists := m.keyMetrics[metricsKey]; exists {
+				hasMetrics = true
+				if keyMask == "" {
+					keyMask = metrics.KeyMask
+				}
+				requestCount += metrics.RequestCount
+
+				// 取最近的使用时间
+				var usedAt *time.Time
+				if metrics.LastSuccessAt != nil {
+					usedAt = metrics.LastSuccessAt
+				}
+				if usedAt == nil {
+					usedAt = metrics.LastFailureAt
+				}
+				if usedAt != nil && (lastUsedAt == nil || usedAt.After(*lastUsedAt)) {
+					lastUsedAt = usedAt
+				}
+			}
+		}
+
+		if !hasMetrics {
+			// Key 还没有指标记录，使用默认脱敏
+			keyMask = utils.MaskAPIKey(apiKey)
+			requestCount = 0
+		}
+
+		infos = append(infos, KeyUsageInfo{
+			APIKey:       apiKey,
+			KeyMask:      keyMask,
+			RequestCount: requestCount,
+			LastUsedAt:   lastUsedAt,
+		})
+	}
+
+	// 按最近使用时间排序（最近的在前面）
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].LastUsedAt == nil && infos[j].LastUsedAt == nil {
+			return infos[i].RequestCount > infos[j].RequestCount // 都未使用时，按访问量排序
+		}
+		if infos[i].LastUsedAt == nil {
+			return false // i 未使用，排后面
+		}
+		if infos[j].LastUsedAt == nil {
+			return true // j 未使用，i 排前面
+		}
+		return infos[i].LastUsedAt.After(*infos[j].LastUsedAt)
+	})
+
+	return infos
+}
+
 // SelectTopKeys 筛选展示的 Key
 // 策略：先取最近使用的 5 个，再从其他 Key 中按访问量补全到 10 个
 func SelectTopKeys(infos []KeyUsageInfo, maxDisplay int) []KeyUsageInfo {
@@ -925,6 +1009,156 @@ type KeyMetricsResponse struct {
 	CircuitBroken       bool    `json:"circuitBroken"`
 }
 
+// ToResponseMultiURL 转换为 API 响应格式（支持多 BaseURL 聚合）
+// baseURLs: 渠道配置的所有 BaseURL（用于多端点 failover 场景）
+func (m *MetricsManager) ToResponseMultiURL(channelIndex int, baseURLs []string, activeKeys []string, latency int64) *MetricsResponse {
+	// 如果没有配置 BaseURL，返回空响应
+	if len(baseURLs) == 0 {
+		return &MetricsResponse{
+			ChannelIndex: channelIndex,
+			Latency:      latency,
+			SuccessRate:  100,
+			ErrorRate:    0,
+		}
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	resp := &MetricsResponse{
+		ChannelIndex: channelIndex,
+		Latency:      latency,
+	}
+
+	if len(activeKeys) == 0 {
+		resp.SuccessRate = 100
+		resp.ErrorRate = 0
+		return resp
+	}
+
+	// 用于按 API Key 聚合的临时结构
+	type keyAggregation struct {
+		keyMask             string
+		requestCount        int64
+		successCount        int64
+		failureCount        int64
+		consecutiveFailures int64
+		circuitBroken       bool
+	}
+	keyAggMap := make(map[string]*keyAggregation) // key: apiKey
+
+	var latestSuccess, latestFailure, latestCircuitBroken *time.Time
+	var totalResults []bool
+	var maxConsecutiveFailures int64
+
+	// 遍历所有 BaseURL 和 Key 的组合
+	for _, baseURL := range baseURLs {
+		for _, apiKey := range activeKeys {
+			metricsKey := generateMetricsKey(baseURL, apiKey)
+			if metrics, exists := m.keyMetrics[metricsKey]; exists {
+				resp.RequestCount += metrics.RequestCount
+				resp.SuccessCount += metrics.SuccessCount
+				resp.FailureCount += metrics.FailureCount
+				if metrics.ConsecutiveFailures > maxConsecutiveFailures {
+					maxConsecutiveFailures = metrics.ConsecutiveFailures
+				}
+				totalResults = append(totalResults, metrics.recentResults...)
+
+				// 取最新的时间戳
+				if metrics.LastSuccessAt != nil && (latestSuccess == nil || metrics.LastSuccessAt.After(*latestSuccess)) {
+					latestSuccess = metrics.LastSuccessAt
+				}
+				if metrics.LastFailureAt != nil && (latestFailure == nil || metrics.LastFailureAt.After(*latestFailure)) {
+					latestFailure = metrics.LastFailureAt
+				}
+				if metrics.CircuitBrokenAt != nil && (latestCircuitBroken == nil || metrics.CircuitBrokenAt.After(*latestCircuitBroken)) {
+					latestCircuitBroken = metrics.CircuitBrokenAt
+				}
+
+				// 按 API Key 聚合（同一 Key 在不同 URL 的指标合并）
+				if agg, ok := keyAggMap[apiKey]; ok {
+					agg.requestCount += metrics.RequestCount
+					agg.successCount += metrics.SuccessCount
+					agg.failureCount += metrics.FailureCount
+					if metrics.ConsecutiveFailures > agg.consecutiveFailures {
+						agg.consecutiveFailures = metrics.ConsecutiveFailures
+					}
+					if metrics.CircuitBrokenAt != nil {
+						agg.circuitBroken = true
+					}
+				} else {
+					keyAggMap[apiKey] = &keyAggregation{
+						keyMask:             metrics.KeyMask,
+						requestCount:        metrics.RequestCount,
+						successCount:        metrics.SuccessCount,
+						failureCount:        metrics.FailureCount,
+						consecutiveFailures: metrics.ConsecutiveFailures,
+						circuitBroken:       metrics.CircuitBrokenAt != nil,
+					}
+				}
+			}
+		}
+	}
+
+	// 构建按 Key 聚合后的响应（保持 activeKeys 顺序）
+	var keyResponses []*KeyMetricsResponse
+	for _, apiKey := range activeKeys {
+		if agg, ok := keyAggMap[apiKey]; ok {
+			keySuccessRate := float64(100)
+			if agg.requestCount > 0 {
+				keySuccessRate = float64(agg.successCount) / float64(agg.requestCount) * 100
+			}
+			keyResponses = append(keyResponses, &KeyMetricsResponse{
+				KeyMask:             agg.keyMask,
+				RequestCount:        agg.requestCount,
+				SuccessCount:        agg.successCount,
+				FailureCount:        agg.failureCount,
+				SuccessRate:         keySuccessRate,
+				ConsecutiveFailures: agg.consecutiveFailures,
+				CircuitBroken:       agg.circuitBroken,
+			})
+		}
+	}
+
+	// 计算聚合失败率
+	resp.ConsecutiveFailures = maxConsecutiveFailures
+
+	if len(totalResults) > 0 {
+		failures := 0
+		for _, success := range totalResults {
+			if !success {
+				failures++
+			}
+		}
+		failureRate := float64(failures) / float64(len(totalResults))
+		resp.SuccessRate = (1 - failureRate) * 100
+		resp.ErrorRate = failureRate * 100
+	} else {
+		resp.SuccessRate = 100
+		resp.ErrorRate = 0
+	}
+
+	if latestSuccess != nil {
+		t := latestSuccess.Format(time.RFC3339)
+		resp.LastSuccessAt = &t
+	}
+	if latestFailure != nil {
+		t := latestFailure.Format(time.RFC3339)
+		resp.LastFailureAt = &t
+	}
+	if latestCircuitBroken != nil {
+		t := latestCircuitBroken.Format(time.RFC3339)
+		resp.CircuitBrokenAt = &t
+	}
+
+	resp.KeyMetrics = keyResponses
+
+	// 计算聚合的时间窗口统计（多 URL 版本）
+	resp.TimeWindows = m.calculateAggregatedTimeWindowsMultiURL(baseURLs, activeKeys)
+
+	return resp
+}
+
 // ToResponse 转换为 API 响应格式（需要提供 baseURL 和 activeKeys）
 func (m *MetricsManager) ToResponse(channelIndex int, baseURL string, activeKeys []string, latency int64) *MetricsResponse {
 	m.mu.RLock()
@@ -1039,6 +1273,7 @@ func (m *MetricsManager) calculateAggregatedTimeWindowsInternal(baseURL string, 
 	for label, duration := range windows {
 		cutoff := now.Add(-duration)
 		var requestCount, successCount, failureCount int64
+		var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int64
 
 		for _, apiKey := range activeKeys {
 			metricsKey := generateMetricsKey(baseURL, apiKey)
@@ -1051,6 +1286,10 @@ func (m *MetricsManager) calculateAggregatedTimeWindowsInternal(baseURL string, 
 						} else {
 							failureCount++
 						}
+						inputTokens += record.InputTokens
+						outputTokens += record.OutputTokens
+						cacheCreationTokens += record.CacheCreationInputTokens
+						cacheReadTokens += record.CacheReadInputTokens
 					}
 				}
 			}
@@ -1061,11 +1300,89 @@ func (m *MetricsManager) calculateAggregatedTimeWindowsInternal(baseURL string, 
 			successRate = float64(successCount) / float64(requestCount) * 100
 		}
 
+		cacheHitRate := float64(0)
+		denom := cacheReadTokens + inputTokens
+		if denom > 0 {
+			cacheHitRate = float64(cacheReadTokens) / float64(denom) * 100
+		}
+
 		result[label] = TimeWindowStats{
-			RequestCount: requestCount,
-			SuccessCount: successCount,
-			FailureCount: failureCount,
-			SuccessRate:  successRate,
+			RequestCount:        requestCount,
+			SuccessCount:        successCount,
+			FailureCount:        failureCount,
+			SuccessRate:         successRate,
+			InputTokens:         inputTokens,
+			OutputTokens:        outputTokens,
+			CacheCreationTokens: cacheCreationTokens,
+			CacheReadTokens:     cacheReadTokens,
+			CacheHitRate:        cacheHitRate,
+		}
+	}
+
+	return result
+}
+
+// calculateAggregatedTimeWindowsMultiURL 计算聚合的时间窗口统计（多 URL 版本，内部方法，调用前需持有锁）
+func (m *MetricsManager) calculateAggregatedTimeWindowsMultiURL(baseURLs []string, activeKeys []string) map[string]TimeWindowStats {
+	windows := map[string]time.Duration{
+		"15m": 15 * time.Minute,
+		"1h":  1 * time.Hour,
+		"6h":  6 * time.Hour,
+		"24h": 24 * time.Hour,
+	}
+
+	result := make(map[string]TimeWindowStats)
+	now := time.Now()
+
+	for label, duration := range windows {
+		cutoff := now.Add(-duration)
+		var requestCount, successCount, failureCount int64
+		var inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int64
+
+		// 遍历所有 BaseURL 和 Key 的组合
+		for _, baseURL := range baseURLs {
+			for _, apiKey := range activeKeys {
+				metricsKey := generateMetricsKey(baseURL, apiKey)
+				if metrics, exists := m.keyMetrics[metricsKey]; exists {
+					for _, record := range metrics.requestHistory {
+						if record.Timestamp.After(cutoff) {
+							requestCount++
+							if record.Success {
+								successCount++
+							} else {
+								failureCount++
+							}
+							inputTokens += record.InputTokens
+							outputTokens += record.OutputTokens
+							cacheCreationTokens += record.CacheCreationInputTokens
+							cacheReadTokens += record.CacheReadInputTokens
+						}
+					}
+				}
+			}
+		}
+
+		successRate := float64(100)
+		if requestCount > 0 {
+			successRate = float64(successCount) / float64(requestCount) * 100
+		}
+
+		cacheHitRate := float64(0)
+		denom := cacheReadTokens + inputTokens
+		if denom > 0 {
+			cacheHitRate = float64(cacheReadTokens) / float64(denom) * 100
+		}
+
+		result[label] = TimeWindowStats{
+			RequestCount:        requestCount,
+			SuccessCount:        successCount,
+			FailureCount:        failureCount,
+			SuccessRate:         successRate,
+			InputTokens:         inputTokens,
+			OutputTokens:        outputTokens,
+			CacheCreationTokens: cacheCreationTokens,
+			CacheReadTokens:     cacheReadTokens,
+			CacheHitRate:        cacheHitRate,
 		}
 	}
 
@@ -1208,8 +1525,8 @@ func (m *MetricsManager) GetHistoricalStats(baseURL string, activeKeys []string,
 		metricsKey := generateMetricsKey(baseURL, apiKey)
 		if metrics, exists := m.keyMetrics[metricsKey]; exists {
 			for _, record := range metrics.requestHistory {
-				// 使用 Before(endTime) 排除恰好落在 endTime 的记录，避免 offset 越界
-				if record.Timestamp.After(startTime) && record.Timestamp.Before(endTime) {
+				// 使用 [startTime, endTime) 的区间，避免 endTime 处 offset 越界
+				if !record.Timestamp.Before(startTime) && record.Timestamp.Before(endTime) {
 					// 计算记录应该属于哪个桶
 					offset := int64(record.Timestamp.Sub(startTime) / interval)
 					if offset >= 0 && offset < int64(numPoints) {
@@ -1236,7 +1553,7 @@ func (m *MetricsManager) GetHistoricalStats(baseURL string, activeKeys []string,
 			successRate = float64(b.successCount) / float64(b.requestCount) * 100
 		}
 		result[i] = HistoryDataPoint{
-			Timestamp:    startTime.Add(time.Duration(i+1) * interval),
+			Timestamp:    startTime.Add(time.Duration(i) * interval),
 			RequestCount: b.requestCount,
 			SuccessCount: b.successCount,
 			FailureCount: b.failureCount,
@@ -1245,6 +1562,236 @@ func (m *MetricsManager) GetHistoricalStats(baseURL string, activeKeys []string,
 	}
 
 	return result
+}
+
+// GetHistoricalStatsMultiURL 获取多 URL 聚合的历史统计数据
+func (m *MetricsManager) GetHistoricalStatsMultiURL(baseURLs []string, activeKeys []string, duration, interval time.Duration) []HistoryDataPoint {
+	// 参数验证
+	if interval <= 0 || duration <= 0 || len(baseURLs) == 0 {
+		return []HistoryDataPoint{}
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+	// 时间对齐到 interval 边界
+	startTime := now.Add(-duration).Truncate(interval)
+	// endTime 延伸一个 interval，确保当前时间段的请求也被包含
+	endTime := now.Truncate(interval).Add(interval)
+
+	// 计算需要多少个数据点（+1 用于包含延伸的当前时间段）
+	numPoints := int(duration / interval)
+	if numPoints <= 0 {
+		numPoints = 1
+	}
+	numPoints++ // 额外的一个桶用于当前时间段
+
+	// 使用 map 按时间分桶，优化性能：O(records) 而不是 O(records * numPoints)
+	buckets := make(map[int64]*bucketData)
+	for i := 0; i < numPoints; i++ {
+		buckets[int64(i)] = &bucketData{}
+	}
+
+	// 收集所有 BaseURL 和 Key 组合的请求历史并放入对应桶
+	for _, baseURL := range baseURLs {
+		for _, apiKey := range activeKeys {
+			metricsKey := generateMetricsKey(baseURL, apiKey)
+			if metrics, exists := m.keyMetrics[metricsKey]; exists {
+				for _, record := range metrics.requestHistory {
+					// 使用 [startTime, endTime) 的区间，避免 endTime 处 offset 越界
+					if !record.Timestamp.Before(startTime) && record.Timestamp.Before(endTime) {
+						// 计算记录应该属于哪个桶
+						offset := int64(record.Timestamp.Sub(startTime) / interval)
+						if offset >= 0 && offset < int64(numPoints) {
+							b := buckets[offset]
+							b.requestCount++
+							if record.Success {
+								b.successCount++
+							} else {
+								b.failureCount++
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 构建结果
+	result := make([]HistoryDataPoint, numPoints)
+	for i := 0; i < numPoints; i++ {
+		b := buckets[int64(i)]
+		// 空桶成功率默认为 0，避免误导（100% 暗示完美成功）
+		successRate := float64(0)
+		if b.requestCount > 0 {
+			successRate = float64(b.successCount) / float64(b.requestCount) * 100
+		}
+		result[i] = HistoryDataPoint{
+			Timestamp:    startTime.Add(time.Duration(i) * interval),
+			RequestCount: b.requestCount,
+			SuccessCount: b.successCount,
+			FailureCount: b.failureCount,
+			SuccessRate:  successRate,
+		}
+	}
+
+	return result
+}
+
+// GetHistoricalStatsMultiURLWithWarning 获取多 URL 聚合的历史统计数据（带 warning 支持）
+func (m *MetricsManager) GetHistoricalStatsMultiURLWithWarning(baseURLs []string, activeKeys []string, duration, interval time.Duration) ([]HistoryDataPoint, string) {
+	if interval <= 0 || duration <= 0 || len(baseURLs) == 0 {
+		return []HistoryDataPoint{}, ""
+	}
+
+	// 24h 内直接走内存
+	if duration <= 24*time.Hour {
+		return m.GetHistoricalStatsMultiURL(baseURLs, activeKeys, duration, interval), ""
+	}
+
+	store, ok := m.store.(*SQLiteStore)
+	if !ok || store == nil {
+		return m.GetHistoricalStatsMultiURL(baseURLs, activeKeys, 24*time.Hour, interval), "指标持久化未启用，已降级为最近 24h 数据"
+	}
+
+	// 7d 内走 request_records 聚合
+	if duration <= 7*24*time.Hour {
+		return m.getHistoricalStatsMultiURLFromRequestRecords(store, baseURLs, activeKeys, duration, interval)
+	}
+
+	return m.getHistoricalStatsMultiURLFromDailyStats(store, baseURLs, activeKeys, duration, interval)
+}
+
+// getHistoricalStatsMultiURLFromRequestRecords 从 request_records 表聚合查询多 URL 历史数据
+func (m *MetricsManager) getHistoricalStatsMultiURLFromRequestRecords(store *SQLiteStore, baseURLs []string, activeKeys []string, duration, interval time.Duration) ([]HistoryDataPoint, string) {
+	now := time.Now()
+	startTime := now.Add(-duration).Truncate(interval)
+	endTime := now.Truncate(interval).Add(interval)
+
+	numPoints := int(duration / interval)
+	if numPoints <= 0 {
+		numPoints = 1
+	}
+	numPoints++
+
+	// 生成所有 baseURL + apiKey 的 metricsKey
+	metricsKeys := make([]string, 0, len(baseURLs)*len(activeKeys))
+	for _, baseURL := range baseURLs {
+		for _, apiKey := range activeKeys {
+			metricsKeys = append(metricsKeys, generateMetricsKey(baseURL, apiKey))
+		}
+	}
+
+	buckets, err := store.QueryRequestRecordBucketStats(m.apiType, startTime, endTime, interval, metricsKeys)
+	if err != nil {
+		return m.GetHistoricalStatsMultiURL(baseURLs, activeKeys, 24*time.Hour, interval), "DB 查询失败，已降级为最近 24h 数据"
+	}
+
+	result := make([]HistoryDataPoint, numPoints)
+	for i := 0; i < numPoints; i++ {
+		agg := buckets[int64(i)]
+		successRate := float64(0)
+		if agg.RequestCount > 0 {
+			successRate = float64(agg.SuccessCount) / float64(agg.RequestCount) * 100
+		}
+		result[i] = HistoryDataPoint{
+			Timestamp:    startTime.Add(time.Duration(i+1) * interval),
+			RequestCount: agg.RequestCount,
+			SuccessCount: agg.SuccessCount,
+			FailureCount: agg.FailureCount,
+			SuccessRate:  successRate,
+		}
+	}
+	return result, ""
+}
+
+// getHistoricalStatsMultiURLFromDailyStats 从 daily_stats 表查询多 URL 历史数据
+func (m *MetricsManager) getHistoricalStatsMultiURLFromDailyStats(store *SQLiteStore, baseURLs []string, activeKeys []string, duration, fallbackInterval time.Duration) ([]HistoryDataPoint, string) {
+	now := time.Now()
+	since := now.Add(-duration)
+	loc := now.Location()
+
+	sinceDayStart := time.Date(since.Year(), since.Month(), since.Day(), 0, 0, 0, 0, loc)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	yesterdayStart := todayStart.AddDate(0, 0, -1)
+
+	// 生成所有 baseURL + apiKey 的 metricsKey
+	metricsKeys := make([]string, 0, len(baseURLs)*len(activeKeys))
+	for _, baseURL := range baseURLs {
+		for _, apiKey := range activeKeys {
+			metricsKeys = append(metricsKeys, generateMetricsKey(baseURL, apiKey))
+		}
+	}
+
+	var warning string
+	dailyTotals := make(map[string]AggregatedStats)
+	if !yesterdayStart.Before(sinceDayStart) {
+		startDate := sinceDayStart.Format("2006-01-02")
+		endDate := yesterdayStart.Format("2006-01-02")
+		mm, err := store.QueryDailyTotals(m.apiType, startDate, endDate, metricsKeys)
+		if err != nil {
+			return m.GetHistoricalStatsMultiURL(baseURLs, activeKeys, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
+		}
+		dailyTotals = mm
+	}
+
+	var partialStart AggregatedStats
+	if since.After(sinceDayStart) {
+		endOfStartDay := sinceDayStart.AddDate(0, 0, 1)
+		if endOfStartDay.After(now) {
+			endOfStartDay = now
+		}
+		agg, err := store.QueryRequestRecordTotals(m.apiType, since, endOfStartDay, metricsKeys)
+		if err != nil {
+			return m.GetHistoricalStatsMultiURL(baseURLs, activeKeys, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
+		}
+		partialStart = agg
+	}
+
+	partialToday, err := store.QueryRequestRecordTotals(m.apiType, todayStart, now, metricsKeys)
+	if err != nil {
+		return m.GetHistoricalStatsMultiURL(baseURLs, activeKeys, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
+	}
+
+	result := make([]HistoryDataPoint, 0, 32)
+	for dayStart := sinceDayStart; !dayStart.After(todayStart); dayStart = dayStart.AddDate(0, 0, 1) {
+		dayEnd := dayStart.AddDate(0, 0, 1)
+		dayStr := dayStart.Format("2006-01-02")
+
+		var agg AggregatedStats
+		switch {
+		case dayStart.Equal(sinceDayStart) && since.After(dayStart):
+			agg = partialStart
+			if agg.RequestCount == 0 {
+				if full, ok := dailyTotals[dayStr]; ok && full.RequestCount > 0 {
+					agg = full
+					if warning == "" {
+						warning = "起始日缺少原始明细，已回退为整日汇总"
+					}
+				}
+			}
+		case dayStart.Equal(todayStart):
+			agg = partialToday
+		default:
+			agg = dailyTotals[dayStr]
+		}
+
+		successRate := float64(0)
+		if agg.RequestCount > 0 {
+			successRate = float64(agg.SuccessCount) / float64(agg.RequestCount) * 100
+		}
+
+		result = append(result, HistoryDataPoint{
+			Timestamp:    dayEnd,
+			RequestCount: agg.RequestCount,
+			SuccessCount: agg.SuccessCount,
+			FailureCount: agg.FailureCount,
+			SuccessRate:  successRate,
+		})
+	}
+
+	return result, warning
 }
 
 func (m *MetricsManager) GetHistoricalStatsWithWarning(baseURL string, activeKeys []string, duration, interval time.Duration) ([]HistoryDataPoint, string) {
@@ -1397,7 +1944,6 @@ type bucketData struct {
 	failureCount int64
 }
 
-// GetAllKeysHistoricalStats 获取所有 Key 的历史统计（不区分渠道）
 func (m *MetricsManager) GetAllKeysHistoricalStats(duration, interval time.Duration) []HistoryDataPoint {
 	// 参数验证
 	if interval <= 0 || duration <= 0 {
@@ -1428,8 +1974,8 @@ func (m *MetricsManager) GetAllKeysHistoricalStats(duration, interval time.Durat
 	// 收集所有 Key 的请求历史并放入对应桶
 	for _, metrics := range m.keyMetrics {
 		for _, record := range metrics.requestHistory {
-			// 使用 Before(endTime) 排除恰好落在 endTime 的记录，避免 offset 越界
-			if record.Timestamp.After(startTime) && record.Timestamp.Before(endTime) {
+			// 使用 [startTime, endTime) 的区间，避免 endTime 处 offset 越界
+			if !record.Timestamp.Before(startTime) && record.Timestamp.Before(endTime) {
 				offset := int64(record.Timestamp.Sub(startTime) / interval)
 				if offset >= 0 && offset < int64(numPoints) {
 					b := buckets[offset]
@@ -1454,7 +2000,7 @@ func (m *MetricsManager) GetAllKeysHistoricalStats(duration, interval time.Durat
 			successRate = float64(b.successCount) / float64(b.requestCount) * 100
 		}
 		result[i] = HistoryDataPoint{
-			Timestamp:    startTime.Add(time.Duration(i+1) * interval),
+			Timestamp:    startTime.Add(time.Duration(i) * interval),
 			RequestCount: b.requestCount,
 			SuccessCount: b.successCount,
 			FailureCount: b.failureCount,
@@ -1556,29 +2102,129 @@ func (m *MetricsManager) GetKeyHistoricalStats(baseURL, apiKey string, duration,
 	return result
 }
 
-func (m *MetricsManager) GetKeyHistoricalStatsWithWarning(baseURL, apiKey string, duration, interval time.Duration) ([]KeyHistoryDataPoint, string) {
-	if interval <= 0 || duration <= 0 {
+// GetKeyHistoricalStatsMultiURL 获取单个 Key 的多 URL 聚合历史统计
+func (m *MetricsManager) GetKeyHistoricalStatsMultiURL(baseURLs []string, apiKey string, duration, interval time.Duration) []KeyHistoryDataPoint {
+	// 参数验证
+	if interval <= 0 || duration <= 0 || len(baseURLs) == 0 {
+		return []KeyHistoryDataPoint{}
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+	// 时间对齐到 interval 边界
+	startTime := now.Add(-duration).Truncate(interval)
+	// endTime 延伸一个 interval，确保当前时间段的请求也被包含
+	endTime := now.Truncate(interval).Add(interval)
+
+	numPoints := int(duration / interval)
+	if numPoints <= 0 {
+		numPoints = 1
+	}
+	numPoints++ // 额外的一个桶用于当前时间段
+
+	// 使用 map 按时间分桶
+	buckets := make(map[int64]*keyBucketData)
+	for i := 0; i < numPoints; i++ {
+		buckets[int64(i)] = &keyBucketData{}
+	}
+
+	// 遍历所有 BaseURL 聚合同一 Key 的历史数据
+	hasData := false
+	for _, baseURL := range baseURLs {
+		metricsKey := generateMetricsKey(baseURL, apiKey)
+		metrics, exists := m.keyMetrics[metricsKey]
+		if !exists {
+			continue
+		}
+		hasData = true
+
+		// 收集该 URL+Key 组合的请求历史并放入对应桶
+		for _, record := range metrics.requestHistory {
+			// 使用 Before(endTime) 排除恰好落在 endTime 的记录，避免 offset 越界
+			if record.Timestamp.After(startTime) && record.Timestamp.Before(endTime) {
+				offset := int64(record.Timestamp.Sub(startTime) / interval)
+				if offset >= 0 && offset < int64(numPoints) {
+					b := buckets[offset]
+					b.requestCount++
+					if record.Success {
+						b.successCount++
+					} else {
+						b.failureCount++
+					}
+					// 累加 Token 数据
+					b.inputTokens += record.InputTokens
+					b.outputTokens += record.OutputTokens
+					b.cacheCreationTokens += record.CacheCreationInputTokens
+					b.cacheReadTokens += record.CacheReadInputTokens
+				}
+			}
+		}
+	}
+
+	// 如果没有任何数据，返回空数据点
+	if !hasData {
+		result := make([]KeyHistoryDataPoint, numPoints)
+		for i := 0; i < numPoints; i++ {
+			result[i] = KeyHistoryDataPoint{
+				Timestamp: startTime.Add(time.Duration(i+1) * interval),
+			}
+		}
+		return result
+	}
+
+	// 构建结果
+	result := make([]KeyHistoryDataPoint, numPoints)
+	for i := 0; i < numPoints; i++ {
+		b := buckets[int64(i)]
+		// 空桶成功率默认为 0，避免误导（100% 暗示完美成功）
+		successRate := float64(0)
+		if b.requestCount > 0 {
+			successRate = float64(b.successCount) / float64(b.requestCount) * 100
+		}
+		result[i] = KeyHistoryDataPoint{
+			Timestamp:                startTime.Add(time.Duration(i+1) * interval),
+			RequestCount:             b.requestCount,
+			SuccessCount:             b.successCount,
+			FailureCount:             b.failureCount,
+			SuccessRate:              successRate,
+			InputTokens:              b.inputTokens,
+			OutputTokens:             b.outputTokens,
+			CacheCreationInputTokens: b.cacheCreationTokens,
+			CacheReadInputTokens:     b.cacheReadTokens,
+		}
+	}
+
+	return result
+}
+
+// GetKeyHistoricalStatsMultiURLWithWarning 获取单个 Key 的多 URL 聚合历史统计（带 warning 支持）
+func (m *MetricsManager) GetKeyHistoricalStatsMultiURLWithWarning(baseURLs []string, apiKey string, duration, interval time.Duration) ([]KeyHistoryDataPoint, string) {
+	if interval <= 0 || duration <= 0 || len(baseURLs) == 0 {
 		return []KeyHistoryDataPoint{}, ""
 	}
 
+	// 24h 内直接走内存
 	if duration <= 24*time.Hour {
-		return m.GetKeyHistoricalStats(baseURL, apiKey, duration, interval), ""
+		return m.GetKeyHistoricalStatsMultiURL(baseURLs, apiKey, duration, interval), ""
 	}
 
 	store, ok := m.store.(*SQLiteStore)
 	if !ok || store == nil {
-		return m.GetKeyHistoricalStats(baseURL, apiKey, 24*time.Hour, interval), "指标持久化未启用，已降级为最近 24h 数据"
+		return m.GetKeyHistoricalStatsMultiURL(baseURLs, apiKey, 24*time.Hour, interval), "指标持久化未启用，已降级为最近 24h 数据"
 	}
 
-	metricsKey := generateMetricsKey(baseURL, apiKey)
+	// 7d 内走 request_records 聚合
 	if duration <= 7*24*time.Hour {
-		return m.getKeyHistoricalStatsFromRequestRecords(store, metricsKey, duration, interval, baseURL, apiKey)
+		return m.getKeyHistoricalStatsMultiURLFromRequestRecords(store, baseURLs, apiKey, duration, interval)
 	}
 
-	return m.getKeyHistoricalStatsFromDailyStats(store, metricsKey, duration, interval, baseURL, apiKey)
+	return m.getKeyHistoricalStatsMultiURLFromDailyStats(store, baseURLs, apiKey, duration, interval)
 }
 
-func (m *MetricsManager) getKeyHistoricalStatsFromRequestRecords(store *SQLiteStore, metricsKey string, duration, interval time.Duration, baseURL, apiKey string) ([]KeyHistoryDataPoint, string) {
+// getKeyHistoricalStatsMultiURLFromRequestRecords 从 request_records 表聚合查询多 URL Key 历史数据
+func (m *MetricsManager) getKeyHistoricalStatsMultiURLFromRequestRecords(store *SQLiteStore, baseURLs []string, apiKey string, duration, interval time.Duration) ([]KeyHistoryDataPoint, string) {
 	now := time.Now()
 	startTime := now.Add(-duration).Truncate(interval)
 	endTime := now.Truncate(interval).Add(interval)
@@ -1589,9 +2235,15 @@ func (m *MetricsManager) getKeyHistoricalStatsFromRequestRecords(store *SQLiteSt
 	}
 	numPoints++
 
-	buckets, err := store.QueryRequestRecordBucketStats(m.apiType, startTime, endTime, interval, []string{metricsKey})
+	// 生成所有 baseURL + apiKey 的 metricsKey
+	metricsKeys := make([]string, 0, len(baseURLs))
+	for _, baseURL := range baseURLs {
+		metricsKeys = append(metricsKeys, generateMetricsKey(baseURL, apiKey))
+	}
+
+	buckets, err := store.QueryRequestRecordBucketStats(m.apiType, startTime, endTime, interval, metricsKeys)
 	if err != nil {
-		return m.GetKeyHistoricalStats(baseURL, apiKey, 24*time.Hour, interval), "DB 查询失败，已降级为最近 24h 数据"
+		return m.GetKeyHistoricalStatsMultiURL(baseURLs, apiKey, 24*time.Hour, interval), "DB 查询失败，已降级为最近 24h 数据"
 	}
 
 	result := make([]KeyHistoryDataPoint, numPoints)
@@ -1614,11 +2266,11 @@ func (m *MetricsManager) getKeyHistoricalStatsFromRequestRecords(store *SQLiteSt
 			CostCents:                agg.CostCents,
 		}
 	}
-
 	return result, ""
 }
 
-func (m *MetricsManager) getKeyHistoricalStatsFromDailyStats(store *SQLiteStore, metricsKey string, duration, fallbackInterval time.Duration, baseURL, apiKey string) ([]KeyHistoryDataPoint, string) {
+// getKeyHistoricalStatsMultiURLFromDailyStats 从 daily_stats 表查询多 URL Key 历史数据
+func (m *MetricsManager) getKeyHistoricalStatsMultiURLFromDailyStats(store *SQLiteStore, baseURLs []string, apiKey string, duration, fallbackInterval time.Duration) ([]KeyHistoryDataPoint, string) {
 	now := time.Now()
 	since := now.Add(-duration)
 	loc := now.Location()
@@ -1627,14 +2279,20 @@ func (m *MetricsManager) getKeyHistoricalStatsFromDailyStats(store *SQLiteStore,
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	yesterdayStart := todayStart.AddDate(0, 0, -1)
 
+	// 生成所有 baseURL + apiKey 的 metricsKey
+	metricsKeys := make([]string, 0, len(baseURLs))
+	for _, baseURL := range baseURLs {
+		metricsKeys = append(metricsKeys, generateMetricsKey(baseURL, apiKey))
+	}
+
 	var warning string
 	dailyTotals := make(map[string]AggregatedStats)
 	if !yesterdayStart.Before(sinceDayStart) {
 		startDate := sinceDayStart.Format("2006-01-02")
 		endDate := yesterdayStart.Format("2006-01-02")
-		mm, err := store.QueryDailyTotals(m.apiType, startDate, endDate, []string{metricsKey})
+		mm, err := store.QueryDailyTotals(m.apiType, startDate, endDate, metricsKeys)
 		if err != nil {
-			return m.GetKeyHistoricalStats(baseURL, apiKey, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
+			return m.GetKeyHistoricalStatsMultiURL(baseURLs, apiKey, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
 		}
 		dailyTotals = mm
 	}
@@ -1645,16 +2303,16 @@ func (m *MetricsManager) getKeyHistoricalStatsFromDailyStats(store *SQLiteStore,
 		if endOfStartDay.After(now) {
 			endOfStartDay = now
 		}
-		agg, err := store.QueryRequestRecordTotals(m.apiType, since, endOfStartDay, []string{metricsKey})
+		agg, err := store.QueryRequestRecordTotals(m.apiType, since, endOfStartDay, metricsKeys)
 		if err != nil {
-			return m.GetKeyHistoricalStats(baseURL, apiKey, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
+			return m.GetKeyHistoricalStatsMultiURL(baseURLs, apiKey, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
 		}
 		partialStart = agg
 	}
 
-	partialToday, err := store.QueryRequestRecordTotals(m.apiType, todayStart, now, []string{metricsKey})
+	partialToday, err := store.QueryRequestRecordTotals(m.apiType, todayStart, now, metricsKeys)
 	if err != nil {
-		return m.GetKeyHistoricalStats(baseURL, apiKey, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
+		return m.GetKeyHistoricalStatsMultiURL(baseURLs, apiKey, 24*time.Hour, fallbackInterval), "DB 查询失败，已降级为最近 24h 数据"
 	}
 
 	result := make([]KeyHistoryDataPoint, 0, 32)

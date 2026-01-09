@@ -457,13 +457,14 @@ func TestMetricsManager_DBBackedHistoryAndFallback(t *testing.T) {
 	if len(kdp) == 0 {
 		t.Fatalf("GetKeyHistoricalStats() empty, want non-empty")
 	}
-	kdp, warn = m.GetKeyHistoricalStatsWithWarning(baseURL, apiKey, 48*time.Hour, 1*time.Hour)
+	baseURLs := []string{baseURL}
+	kdp, warn = m.GetKeyHistoricalStatsMultiURLWithWarning(baseURLs, apiKey, 48*time.Hour, 1*time.Hour)
 	if warn != "" || len(kdp) == 0 {
-		t.Fatalf("GetKeyHistoricalStatsWithWarning(<=7d) warn=%q len=%d, want warn empty and len>0", warn, len(kdp))
+		t.Fatalf("GetKeyHistoricalStatsMultiURLWithWarning(<=7d) warn=%q len=%d, want warn empty and len>0", warn, len(kdp))
 	}
-	kdp, warn = m.GetKeyHistoricalStatsWithWarning(baseURL, apiKey, duration, 1*time.Hour)
+	kdp, warn = m.GetKeyHistoricalStatsMultiURLWithWarning(baseURLs, apiKey, duration, 1*time.Hour)
 	if warn == "" || len(kdp) == 0 {
-		t.Fatalf("GetKeyHistoricalStatsWithWarning(>7d) warn=%q len=%d, want warn non-empty and len>0", warn, len(kdp))
+		t.Fatalf("GetKeyHistoricalStatsMultiURLWithWarning(>7d) warn=%q len=%d, want warn non-empty and len>0", warn, len(kdp))
 	}
 
 	// 全局历史统计（覆盖 <=24h / request_records / daily_stats）。
@@ -498,9 +499,10 @@ func TestMetricsManager_DBBackedHistoryAndFallback(t *testing.T) {
 	if warn == "" {
 		t.Fatalf("GetHistoricalStatsWithWarning(DB fail) warning empty, want non-empty")
 	}
-	_, warn = mFail.GetKeyHistoricalStatsWithWarning(baseURL, apiKey, 48*time.Hour, 1*time.Hour)
+	baseURLs = []string{baseURL}
+	_, warn = mFail.GetKeyHistoricalStatsMultiURLWithWarning(baseURLs, apiKey, 48*time.Hour, 1*time.Hour)
 	if warn == "" {
-		t.Fatalf("GetKeyHistoricalStatsWithWarning(DB fail) warning empty, want non-empty")
+		t.Fatalf("GetKeyHistoricalStatsMultiURLWithWarning(DB fail) warning empty, want non-empty")
 	}
 	g = mFail.GetGlobalHistoricalStatsWithTokens(48*time.Hour, 1*time.Hour)
 	if g.Warning == "" {

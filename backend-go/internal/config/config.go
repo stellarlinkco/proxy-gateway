@@ -80,11 +80,14 @@ type ConfigManager struct {
 	config          Config
 	configFile      string
 	watcher         *fsnotify.Watcher
+	keyIndexMu      sync.Mutex
+	keyIndex        map[string]int
 	failedKeysCache map[string]*FailedKey
 	keyRecoveryTime time.Duration
 	maxFailureCount int
 	stopChan        chan struct{} // 用于通知 goroutine 停止
 	closeOnce       sync.Once     // 确保 Close 只执行一次
+	wg              sync.WaitGroup
 }
 
 // ============== 核心共享方法 ==============
@@ -124,63 +127,111 @@ func (cm *ConfigManager) GetConfig() Config {
 	return cloned
 }
 
-// GetNextAPIKey 获取下一个 API 密钥（纯 failover 模式）
+// GetNextAPIKey 获取下一个 API 密钥（Key 轮询）
 func (cm *ConfigManager) GetNextAPIKey(upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
-	if len(upstream.APIKeys) == 0 {
+	return cm.getNextAPIKeyRoundRobin("messages", upstream, failedKeys)
+}
+
+func (cm *ConfigManager) getNextAPIKeyRoundRobin(namespace string, upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
+	if upstream == nil {
+		return "", fmt.Errorf("upstream 为空")
+	}
+
+	keys := upstream.APIKeys
+	if len(keys) == 0 {
 		return "", fmt.Errorf("上游 %s 没有可用的API密钥", upstream.Name)
 	}
 
-	// 单 Key 直接返回
-	if len(upstream.APIKeys) == 1 {
-		return upstream.APIKeys[0], nil
+	cursorKey := namespace + ":" + upstream.Name
+	if upstream.Name == "" {
+		cursorKey = fmt.Sprintf("%s:%p", namespace, upstream)
 	}
 
-	// 筛选可用密钥：排除临时失败密钥和内存中的失败密钥
-	availableKeys := []string{}
-	for _, key := range upstream.APIKeys {
-		if !failedKeys[key] && !cm.isKeyFailed(key) {
-			availableKeys = append(availableKeys, key)
+	usable := make([]bool, len(keys))
+	usableCount := 0
+	for i, key := range keys {
+		if key == "" {
+			continue
 		}
+		if failedKeys != nil && failedKeys[key] {
+			continue
+		}
+		if cm.isKeyFailed(key) {
+			continue
+		}
+		usable[i] = true
+		usableCount++
 	}
-
-	if len(availableKeys) == 0 {
-		// 如果所有密钥都失效，尝试选择失败时间最早的密钥（恢复尝试）
+	if usableCount == 0 {
+		// 所有 key 都处于冷却期（或已在本次请求中尝试过），允许做一次恢复尝试：
+		// 选择失败时间最早的 key，避免彻底不可用。
 		var oldestFailedKey string
 		oldestTime := time.Now()
 
 		cm.mu.RLock()
-		for _, key := range upstream.APIKeys {
-			if !failedKeys[key] { // 排除本次请求已经尝试过的密钥
-				if failure, exists := cm.failedKeysCache[key]; exists {
-					if failure.Timestamp.Before(oldestTime) {
-						oldestTime = failure.Timestamp
-						oldestFailedKey = key
-					}
-				}
+		for _, key := range keys {
+			if key == "" {
+				continue
+			}
+			if failedKeys != nil && failedKeys[key] {
+				continue
+			}
+			failure, exists := cm.failedKeysCache[key]
+			if !exists {
+				continue
+			}
+			if failure.Timestamp.Before(oldestTime) {
+				oldestTime = failure.Timestamp
+				oldestFailedKey = key
 			}
 		}
 		cm.mu.RUnlock()
 
-		if oldestFailedKey != "" {
-			log.Printf("[Config-Key] 警告: 所有密钥都失效，尝试最早失败的密钥: %s", utils.MaskAPIKey(oldestFailedKey))
-			return oldestFailedKey, nil
+		if oldestFailedKey == "" {
+			return "", fmt.Errorf("上游 %s 的所有API密钥都暂时不可用", upstream.Name)
 		}
 
-		return "", fmt.Errorf("上游 %s 的所有API密钥都暂时不可用", upstream.Name)
+		cm.keyIndexMu.Lock()
+		if cm.keyIndex != nil {
+			for i, key := range keys {
+				if key == oldestFailedKey {
+					cm.keyIndex[cursorKey] = (i + 1) % len(keys)
+					break
+				}
+			}
+		}
+		cm.keyIndexMu.Unlock()
+
+		log.Printf("[Config-Key] 警告: 所有密钥都失效，尝试最早失败的密钥: %s", utils.MaskAPIKey(oldestFailedKey))
+		return oldestFailedKey, nil
 	}
 
-	// 纯 failover：按优先级顺序选择第一个可用密钥
-	selectedKey := availableKeys[0]
-	// 获取该密钥在原始列表中的索引
-	keyIndex := 0
-	for i, key := range upstream.APIKeys {
-		if key == selectedKey {
-			keyIndex = i + 1
-			break
-		}
+	cm.keyIndexMu.Lock()
+	defer cm.keyIndexMu.Unlock()
+
+	if cm.keyIndex == nil {
+		cm.keyIndex = make(map[string]int)
 	}
-	log.Printf("[Config-Key] 故障转移选择密钥 %s (%d/%d)", utils.MaskAPIKey(selectedKey), keyIndex, len(upstream.APIKeys))
-	return selectedKey, nil
+
+	start := cm.keyIndex[cursorKey]
+	if start < 0 || start >= len(keys) {
+		start = 0
+	}
+
+	for i := 0; i < len(keys); i++ {
+		idx := (start + i) % len(keys)
+		if !usable[idx] {
+			continue
+		}
+
+		selectedKey := keys[idx]
+		cm.keyIndex[cursorKey] = (idx + 1) % len(keys)
+		log.Printf("[Config-Key] 轮询选择密钥 %s (%d/%d)", utils.MaskAPIKey(selectedKey), idx+1, len(keys))
+		return selectedKey, nil
+	}
+
+	// 理论上不可达：usableCount > 0 时一定能选到 key
+	return "", fmt.Errorf("上游 %s 的所有API密钥都暂时不可用", upstream.Name)
 }
 
 // MarkKeyAsFailed 标记密钥失败

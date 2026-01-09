@@ -474,8 +474,10 @@ func parseResponsesUsage(usageRaw interface{}) types.ResponsesUsage {
 		usage.OutputTokens = v
 	}
 
+	hasTotalTokens := false
 	if v, ok := getIntFromMap(usageMap, "total_tokens"); ok {
 		usage.TotalTokens = v
+		hasTotalTokens = true
 	} else {
 		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
 	}
@@ -488,7 +490,22 @@ func parseResponsesUsage(usageRaw interface{}) types.ResponsesUsage {
 	if detailsMap, ok := inputDetailsRaw.(map[string]interface{}); ok {
 		usage.InputTokensDetails = &types.InputTokensDetails{}
 		if v, ok := getIntFromMap(detailsMap, "cached_tokens"); ok {
-			usage.InputTokensDetails.CachedTokens = v
+			cachedTokens := v
+			if cachedTokens < 0 {
+				cachedTokens = 0
+			}
+			usage.InputTokensDetails.CachedTokens = cachedTokens
+			usage.CacheReadInputTokens = cachedTokens
+
+			billableInputTokens := usage.InputTokens - cachedTokens
+			if billableInputTokens < 0 {
+				billableInputTokens = 0
+			}
+			usage.InputTokens = billableInputTokens
+
+			if !hasTotalTokens {
+				usage.TotalTokens = usage.InputTokens + usage.OutputTokens
+			}
 		}
 	}
 

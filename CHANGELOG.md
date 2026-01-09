@@ -4,6 +4,110 @@
 
 ---
 
+## [v2.4.28] - 2026-01-07
+
+### 🐛 修复
+
+- **修复内容审核错误导致无限重试问题** - 当上游返回 `sensitive_words_detected` 等内容审核错误时，单渠道场景下会无限重试
+  - 根因：`classifyByStatusCode(500)` 触发 failover，但未检查 `error.code` 字段中的不可重试错误码
+  - 新增 `isNonRetryableErrorCode()` 函数，检测内容审核和无效请求错误码
+  - 新增 `isNonRetryableError()` 函数，从响应体提取并检测不可重试错误
+  - 在 `shouldRetryWithNextKeyNormal()` 和 `shouldRetryWithNextKeyFuzzy()` 入口处优先检测
+  - 不可重试错误码：`sensitive_words_detected`、`content_policy_violation`、`content_filter`、`content_blocked`、`moderation_blocked`、`invalid_request`、`invalid_request_error`、`bad_request`
+  - 涉及文件：`backend-go/internal/handlers/common/failover.go`
+
+### 🧪 测试
+
+- **新增不可重试错误码测试** - 覆盖 `sensitive_words_detected` 等错误码在 Normal/Fuzzy 模式下的行为
+  - 涉及文件：`backend-go/internal/handlers/common/failover_test.go`
+
+## [v2.4.27] - 2026-01-05
+
+### 🐛 修复
+
+- **修复多端点 failover 渠道统计丢失问题** - 当渠道配置多个 `baseUrls` 时，请求路由到非主 URL 后指标无法正确聚合到渠道统计
+  - 根因：指标存储使用 `hash(baseURL + apiKey)` 作为键，但查询方法只使用主 BaseURL
+  - 新增 4 个多 URL 聚合方法：`GetHistoricalStatsMultiURL`、`GetChannelKeyUsageInfoMultiURL`、`GetKeyHistoricalStatsMultiURL`、`calculateAggregatedTimeWindowsMultiURL`
+  - `ToResponseMultiURL` 按 API Key 去重聚合，避免同一 Key 在多 URL 场景下产生重复条目
+  - Handler 层全部改用 `upstream.GetAllBaseURLs()` 获取所有 URL 进行聚合
+  - 涉及文件：`backend-go/internal/metrics/channel_metrics.go`、`backend-go/internal/handlers/channel_metrics_handler.go`
+
+## [v2.4.26] - 2026-01-05
+
+### 🐛 修复
+
+- **修复 Key 趋势图切换时间范围后不刷新问题** - 持久化 view/duration 选择到 localStorage，使用 requestId 防止自动刷新旧响应覆盖新选择
+  - 涉及文件：`frontend/src/components/KeyTrendChart.vue`
+
+- **修复 KeyTrendChart SSR 兼容性和健壮性问题**
+  - 添加 `isLocalStorageAvailable()` 检查，防止 SSR 环境下访问 localStorage 崩溃
+  - 为 localStorage 读写操作添加 try/catch 异常捕获（配额超限、隐私模式等场景）
+  - 添加 `channelType` prop 变化监听，切换渠道类型时自动重载偏好设置并刷新数据
+  - 优化 channelType watcher 逻辑，避免与 duration watcher 重复触发刷新
+  - 涉及文件：`frontend/src/components/KeyTrendChart.vue`
+
+- **修复缓存创建统计缺失问题** - 当上游仅返回 TTL 细分字段（5m/1h）时，兜底汇总为 cacheCreationTokens
+  - 涉及文件：`backend-go/internal/metrics/channel_metrics.go`
+
+- **透传缓存 TTL 细分字段到指标层** - Responses 非流式/流式 usage 现在包含 CacheCreation5m/1h + CacheTTL
+  - 涉及文件：`backend-go/internal/handlers/responses/handler.go`
+
+### 🧪 测试
+
+- **新增 TTL 细分字段兜底测试** - 覆盖 cache_creation_input_tokens 为 0 时的汇总场景
+  - 涉及文件：`backend-go/internal/metrics/channel_metrics_cache_stats_test.go`
+
+## [v2.4.25] - 2026-01-04
+
+### 🧪 测试
+
+- **新增 baseUrl/baseUrls 一致性测试套件** - 覆盖 URL 配置的完整场景，防止编辑渠道时数据不一致问题回归
+  - `TestUpdateUpstream_BaseURLConsistency`: 验证 Messages 渠道更新时 baseUrl/baseUrls 的一致性（4 场景）
+  - `TestUpdateResponsesUpstream_BaseURLConsistency`: 验证 Responses 渠道更新一致性
+  - `TestUpdateGeminiUpstream_BaseURLConsistency`: 验证 Gemini 渠道更新一致性
+  - `TestGetAllBaseURLs_Priority`: 验证 URL 获取优先级逻辑（4 场景）
+  - `TestGetEffectiveBaseURL_Priority`: 验证有效 URL 选择逻辑（3 场景）
+  - `TestDeduplicateBaseURLs`: 验证 URL 去重逻辑（7 场景，含末尾斜杠/井号差异）
+  - `TestAddUpstream_BaseURLDeduplication`: 验证添加渠道时的 URL 去重
+  - 涉及文件：`internal/config/config_baseurl_test.go`（新增 414 行）
+
+### 🐛 修复
+
+- **修复历史分桶边界导致边界点漏算** - 历史统计 API 的时间过滤条件从开区间 `(startTime, endTime)` 改为半开区间 `[startTime, endTime)`，避免恰好落在 startTime 的记录被遗漏
+  - 涉及文件：`internal/metrics/channel_metrics.go`
+
+- **修复历史图表时间戳错位** - 将返回的 Timestamp 从"桶结束时间"改为"桶起始时间"，前端图表不再出现一格偏差
+  - 涉及文件：`internal/metrics/channel_metrics.go`
+
+- **修复成功计数可能重复记录** - 移除多渠道/单渠道成功路径上多余的 `RecordSuccess()` 调用，统一使用 `RecordSuccessWithUsage()` 作为唯一成功计数入口
+  - Messages 路径：移除重复调用，保留流式/非流式末尾的 `RecordSuccessWithUsage`
+  - Responses compact 路径：改用 `RecordSuccessWithUsage(nil)` 替代原 `RecordSuccess`，保持指标一致性
+  - 涉及文件：`internal/handlers/messages/handler.go`、`internal/handlers/responses/compact.go`
+
+- **修复多 BaseURL 故障转移时成功指标归属错误** - 当请求通过 fallback BaseURL 成功时，成功指标错误地记录到主 BaseURL 而非实际成功的 URL
+  - 根本原因：`handleNormalResponse` 和 `HandleStreamResponse` 接收的是原始 `upstream` 而非设置了 `currentBaseURL` 的 `upstreamCopy`
+  - 修复方式：将两处调用点的参数从 `upstream` 改为 `upstreamCopy`
+  - 影响范围：多渠道/单渠道的流式与非流式响应处理
+  - 涉及文件：`internal/handlers/messages/handler.go`
+
+---
+
+## [v2.4.24] - 2026-01-04
+
+### ✨ 新功能
+
+- **缓存命中率统计** - 按 Token 口径展示各渠道缓存读/写与命中率：
+  - 后端：在 `timeWindows` 聚合统计中新增 `inputTokens`/`outputTokens`/`cacheCreationTokens`/`cacheReadTokens`/`cacheHitRate` 字段
+  - 命中率定义：`cacheReadTokens / (cacheReadTokens + inputTokens) * 100`
+  - 前端：渠道编排列表在 15 分钟有请求时额外显示缓存命中率，tooltip 中按 15m/1h/6h/24h 展示缓存统计
+  - 新字段均为 `omitempty`，向后兼容
+
+### 🎨 优化
+
+- **调整渠道指标显示间距** - 优化缓存命中率 chip 与请求数之间的间距，避免布局拥挤
+
+---
+
 ## [v2.4.23] - 2026-01-03
 
 ### ✨ 新功能

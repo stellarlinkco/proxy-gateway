@@ -74,7 +74,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useTheme } from 'vuetify'
 import VueApexCharts from 'vue3-apexcharts'
-import { api, type ChannelKeyMetricsHistoryResponse, type KeyHistoryData } from '../services/api'
+import { api, type ChannelKeyMetricsHistoryResponse } from '../services/api'
 
 // Register apexchart component
 const apexchart = VueApexCharts
@@ -89,20 +89,64 @@ const props = defineProps<{
 type ViewMode = 'traffic' | 'tokens' | 'cache' | 'cost'
 type Duration = '1h' | '6h' | '24h' | 'today'
 
+// LocalStorage keys for preferences (per channelType)
+const getStorageKey = (channelType: string, key: string) => `keyTrendChart:${channelType}:${key}`
+
+// Check if localStorage is available (SSR-safe)
+const isLocalStorageAvailable = (): boolean => {
+  try {
+    return typeof window !== 'undefined' && window.localStorage !== undefined
+  } catch {
+    return false
+  }
+}
+
+const loadSavedPreferences = (channelType: string): { view: ViewMode; duration: Duration } => {
+  if (!isLocalStorageAvailable()) {
+    return { view: 'traffic', duration: '1h' }
+  }
+  try {
+    const savedView = window.localStorage.getItem(getStorageKey(channelType, 'viewMode')) as ViewMode | null
+    const savedDuration = window.localStorage.getItem(getStorageKey(channelType, 'duration')) as Duration | null
+    return {
+      view: savedView && ['traffic', 'tokens', 'cache'].includes(savedView) ? savedView : 'traffic',
+      duration: savedDuration && ['1h', '6h', '24h', 'today'].includes(savedDuration) ? savedDuration : '1h'
+    }
+  } catch {
+    return { view: 'traffic', duration: '1h' }
+  }
+}
+
+const savePreference = (channelType: string, key: string, value: string) => {
+  if (!isLocalStorageAvailable()) return
+  try {
+    window.localStorage.setItem(getStorageKey(channelType, key), value)
+  } catch {
+    // Ignore storage errors (quota exceeded, private mode, etc.)
+  }
+}
+
 // Theme
 const theme = useTheme()
 const isDark = computed(() => theme.global.current.value.dark)
 
+// Load saved preferences for current channelType
+const savedPrefs = loadSavedPreferences(props.channelType)
+
 // State
-const selectedView = ref<ViewMode>('traffic')
-const selectedDuration = ref<Duration>('1h')
+const selectedView = ref<ViewMode>(savedPrefs.view)
+const selectedDuration = ref<Duration>(savedPrefs.duration)
 const isLoading = ref(false)
+const isRefreshing = ref(false) // includes auto refresh (silent) requests
 const historyData = ref<ChannelKeyMetricsHistoryResponse | null>(null)
 const showError = ref(false)
 const errorMessage = ref('')
 
 // Chart ref for updateSeries
 const chartRef = ref<InstanceType<typeof VueApexCharts> | null>(null)
+
+// request id for refreshData
+let refreshRequestId = 0
 
 // Auto refresh timer (2 seconds interval, same as global refresh)
 const AUTO_REFRESH_INTERVAL = 2000
@@ -111,8 +155,8 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 const startAutoRefresh = () => {
   stopAutoRefresh()
   autoRefreshTimer = setInterval(() => {
-    // Skip if already loading to prevent concurrent requests
-    if (!isLoading.value) {
+    // Skip if already refreshing to prevent concurrent requests / stale overwrites
+    if (!isRefreshing.value) {
       refreshData(true) // true = auto refresh, use updateSeries
     }
   }, AUTO_REFRESH_INTERVAL)
@@ -652,6 +696,10 @@ const getChartColors = (): string[] => {
 
 // Fetch data
 const refreshData = async (isAutoRefresh = false) => {
+  // Prevent out-of-order responses from overwriting newer state
+  const requestId = ++refreshRequestId
+  isRefreshing.value = true
+
   // Auto refresh uses silent update without loading state
   if (!isAutoRefresh) {
     isLoading.value = true
@@ -666,6 +714,9 @@ const refreshData = async (isAutoRefresh = false) => {
     } else {
       newData = await api.getChannelKeyMetricsHistory(props.channelId, selectedDuration.value)
     }
+
+    // Ignore stale response
+    if (requestId !== refreshRequestId) return
 
     // Check if we can use updateSeries (same keys structure)
     const canUpdateInPlace = isAutoRefresh &&
@@ -683,24 +734,46 @@ const refreshData = async (isAutoRefresh = false) => {
       historyData.value = newData
     }
   } catch (error) {
+    // Ignore stale error
+    if (requestId !== refreshRequestId) return
+
     console.error('Failed to fetch key metrics history:', error)
     errorMessage.value = error instanceof Error ? error.message : '获取 Key 历史数据失败'
     showError.value = true
     historyData.value = null
   } finally {
-    if (!isAutoRefresh) {
-      isLoading.value = false
+    // Only let the latest request update flags
+    if (requestId === refreshRequestId) {
+      isRefreshing.value = false
+      if (!isAutoRefresh) {
+        isLoading.value = false
+      }
     }
   }
 }
 
 // Watchers
 watch(selectedDuration, () => {
+  savePreference(props.channelType, 'duration', selectedDuration.value)
   refreshData()
-})
+}, { flush: 'sync' })
 
 watch(selectedView, () => {
+  savePreference(props.channelType, 'viewMode', selectedView.value)
   // View change doesn't need to refetch, just re-render chart
+}, { flush: 'sync' })
+
+// Watch channelType changes to reload preferences and refresh data
+watch(() => props.channelType, (newChannelType) => {
+  const prefs = loadSavedPreferences(newChannelType)
+  const oldDuration = selectedDuration.value
+  selectedView.value = prefs.view
+  selectedDuration.value = prefs.duration
+  historyData.value = null
+  // Only explicitly refresh if duration didn't change (otherwise duration watcher handles it)
+  if (oldDuration === prefs.duration) {
+    refreshData()
+  }
 })
 
 // Initial load and start auto refresh

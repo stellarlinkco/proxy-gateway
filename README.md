@@ -1,4 +1,4 @@
-# Claude API 代理服务器
+# Claude / Codex / Gemini API Proxy
 
 [![GitHub release](https://img.shields.io/github/v/release/BenedictKing/claude-proxy)](https://github.com/BenedictKing/claude-proxy/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -10,15 +10,16 @@
 - **🖥️ 一体化架构**: 后端集成前端，单容器部署，完全替代 Nginx
 - **🔐 统一认证**: 一个密钥保护所有入口（前端界面、管理 API、代理 API）
 - **📱 Web 管理面板**: 现代化可视化界面，支持渠道管理、实时监控和配置
-- **双 API 支持**: 同时支持 Claude Messages API (`/v1/messages`) 和 Codex Responses API (`/v1/responses`)
+- **三 API 支持**: 同时支持 Claude Messages API (`/v1/messages`)、Codex Responses API (`/v1/responses`) 和 Gemini API
 - **统一入口**: 通过统一端点访问不同的 AI 服务
 - **多上游支持**: 支持 Claude、Codex 和 Gemini 等多种上游服务
-- **🔌 协议转换**: Messages API 支持通过 OpenAI 兼容接口转接到其他 AI 服务
+- **🔌 协议转换**: Messages API 支持协议自动转换，统一接入不同上游服务
 - **🎯 智能调度**: 多渠道智能调度器，支持优先级排序、健康检查和自动熔断
 - **📊 渠道编排**: 可视化渠道管理，拖拽调整优先级，实时查看健康状态
 - **🔄 Trace 亲和**: 同一用户会话自动绑定到同一渠道，提升一致性体验
 - **负载均衡**: 支持轮询、随机、故障转移策略，Claude/Codex 负载均衡互不影响
 - **多 API 密钥**: 每个上游可配置多个 API 密钥，自动轮换使用（推荐 failover 策略以最大化利用 Prompt Caching）
+- **🧠 缓存统计**: 按 Token 口径展示各渠道缓存读/写与命中率（命中率 = `cache_read_tokens / (cache_read_tokens + input_tokens)`）
 - **增强的稳定性**: 内置上游请求超时与重试机制，确保服务在网络波动时依然可靠
 - **自动重试与密钥降级**: 检测到额度/余额不足等错误时自动切换下一个可用密钥；若后续请求成功，再将失败密钥移动到末尾（降级）；所有密钥均失败时按上游原始错误返回
 - **⚡ 自动熔断**: 基于滑动窗口算法检测渠道健康度，失败率过高自动熔断，15 分钟后自动恢复
@@ -59,7 +60,9 @@
      ├─ / → 前端界面（需要密钥）
      ├─ /api/* → 管理API（需要密钥）
      ├─ /v1/messages → Claude Messages API 代理（需要密钥）
-     └─ /v1/responses → Codex Responses API 代理（需要密钥）
+     ├─ /v1/responses → Codex Responses API 代理（需要密钥）
+     ├─ /v1/models → Models API（需要密钥）
+     └─ /v1beta/models/* → Gemini API 代理（需要密钥）
 ```
 
 **核心优势**: 单端口、统一认证、无跨域问题、资源占用低
@@ -153,6 +156,7 @@ docker-compose up -d
 - **Web 管理界面**: http://localhost:3000
 - **Messages API 端点**: http://localhost:3000/v1/messages
 - **Responses API 端点**: http://localhost:3000/v1/responses
+- **Gemini API 端点**: http://localhost:3000/v1beta/models/{model}:generateContent
 - **健康检查**: http://localhost:3000/health
 
 ---
@@ -343,12 +347,14 @@ docker-compose restart claude-proxy
 
 ## 📖 API 使用
 
-本服务支持两种 API 格式：
+本服务支持以下 API 格式：
 
 1. **Messages API** (`/v1/messages`) - 标准的 Claude API 格式
 2. **Messages Token 计数** (`/v1/messages/count_tokens`) - Token 计数
 3. **Responses API** (`/v1/responses`) - Codex 格式，支持会话管理
 4. **Responses Compact** (`/v1/responses/compact`) - 精简版 Responses API
+5. **Models API** (`/v1/models`) - 模型列表查询
+6. **Gemini API** (`/v1beta/models/{model}:generateContent`) - Gemini 原生协议
 
 ### Messages API - 标准 Claude API 调用
 
@@ -477,6 +483,36 @@ curl -X POST http://localhost:3000/v1/responses \
   - `output`: 模型输出内容
   - `usage`: Token 使用统计
 
+### Gemini API - 原生协议调用
+
+Gemini API 使用 Google 原生协议格式，支持 `generateContent` 和 `streamGenerateContent`：
+
+#### 基础调用
+
+```bash
+curl -X POST "http://localhost:3000/v1beta/models/gemini-2.0-flash:generateContent" \
+  -H "x-api-key: your-proxy-access-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {"role": "user", "parts": [{"text": "Hello!"}]}
+    ]
+  }'
+```
+
+#### 流式响应
+
+```bash
+curl -X POST "http://localhost:3000/v1beta/models/gemini-2.0-flash:streamGenerateContent" \
+  -H "x-api-key: your-proxy-access-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [
+      {"role": "user", "parts": [{"text": "从1数到10"}]}
+    ]
+  }'
+```
+
 ### 管理 API
 
 ```bash
@@ -508,7 +544,7 @@ curl -H "x-api-key: your-proxy-access-key" \
 - 🔌 **即插即用**: 无需修改客户端代码即可切换上游服务
 - 💰 **成本优化**: 灵活切换不同价格的 AI 服务
 
-**示例**: 使用 Claude API 格式调用 OpenAI GPT-4
+**示例**: 使用 Claude API 格式调用 Codex
 
 ```bash
 curl -X POST http://localhost:3000/v1/messages \
@@ -521,7 +557,7 @@ curl -X POST http://localhost:3000/v1/messages \
       {"role": "user", "content": "Hello!"}
     ]
   }'
-# 后端自动转换并发送到配置的 OpenAI 上游
+# 后端自动转换并发送到配置的 Codex 上游
 ```
 
 ## 🧪 测试验证
@@ -748,27 +784,6 @@ cd backend-go && make help
 - **📝 版本历史**: [CHANGELOG.md](CHANGELOG.md) - 完整变更记录和升级指南
 - **🚀 发布流程**: [RELEASE.md](RELEASE.md) - 维护者发布流程
 
-## 🖥️ 相关项目
-
-### ProxyCast - 桌面版凭证代理工具
-
-如果你需要把 **AI 客户端的免费额度**（如 Kiro、Gemini CLI、通义千问）转换成标准 OpenAI API 供其他工具使用，可以试试我们的桌面应用 **ProxyCast**。
-
-**适用场景**：
-- 🔄 把 Kiro 的免费 Claude Sonnet 4.5 额度用在 Claude Code 或 Cursor 上
-- 💰 把 Claude Code 剩余额度转给 Cherry Studio 或自己的 AI Agent 项目
-- 🎯 统一管理多个 AI 账号，哪个有额度就用哪个
-
-**核心特性**：
-- 支持 Kiro、Gemini CLI、通义千问、OpenAI Codex、Vertex AI 等多种 Provider
-- 友好的图形界面，一键加载凭证、启动服务
-- 自动检测凭证变化、Token 过期自动刷新
-- 配额超限自动切换到下一个可用凭证
-
-📦 **下载地址**: [ProxyCast Releases](https://github.com/aiclientproxy/proxycast/releases)
-
-📚 **项目文档**: [refs/proxycast](refs/proxycast/) | [在线文档](https://proxycast.pages.dev/)
-
 ## 📄 许可证
 
 本项目基于 MIT 许可证开源 - 查看 [LICENSE](LICENSE) 文件了解详情。
@@ -776,5 +791,5 @@ cd backend-go && make help
 ## 🙏 致谢
 
 - [Anthropic](https://www.anthropic.com/) - Claude API
-- [OpenAI](https://openai.com/) - GPT API
+- [OpenAI](https://openai.com/) - Codex API
 - [Google](https://cloud.google.com/vertex-ai) - Gemini API

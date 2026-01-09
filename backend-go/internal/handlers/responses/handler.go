@@ -307,7 +307,9 @@ func handleMultiChannel(
 				reqCtx.success = true
 				reqCtx.errorMsg = ""
 			}
-			channelScheduler.SetTraceAffinity(userID, channelIndex)
+			if selection.Reason == "trace_affinity" {
+				channelScheduler.UpdateTraceAffinity(userID)
+			}
 			return
 		}
 
@@ -817,10 +819,13 @@ func handleSuccess(
 
 	// 返回 usage 数据用于指标记录
 	return &types.Usage{
-		InputTokens:              responsesResp.Usage.InputTokens,
-		OutputTokens:             responsesResp.Usage.OutputTokens,
-		CacheCreationInputTokens: responsesResp.Usage.CacheCreationInputTokens,
-		CacheReadInputTokens:     responsesResp.Usage.CacheReadInputTokens,
+		InputTokens:                responsesResp.Usage.InputTokens,
+		OutputTokens:               responsesResp.Usage.OutputTokens,
+		CacheCreationInputTokens:   responsesResp.Usage.CacheCreationInputTokens,
+		CacheReadInputTokens:       responsesResp.Usage.CacheReadInputTokens,
+		CacheCreation5mInputTokens: responsesResp.Usage.CacheCreation5mInputTokens,
+		CacheCreation1hInputTokens: responsesResp.Usage.CacheCreation1hInputTokens,
+		CacheTTL:                   responsesResp.Usage.CacheTTL,
 	}
 }
 
@@ -1108,10 +1113,13 @@ func handleStreamSuccess(
 
 	// 返回收集到的 usage 数据
 	return &types.Usage{
-		InputTokens:              collectedUsage.InputTokens,
-		OutputTokens:             collectedUsage.OutputTokens,
-		CacheCreationInputTokens: collectedUsage.CacheCreationInputTokens,
-		CacheReadInputTokens:     collectedUsage.CacheReadInputTokens,
+		InputTokens:                collectedUsage.InputTokens,
+		OutputTokens:               collectedUsage.OutputTokens,
+		CacheCreationInputTokens:   collectedUsage.CacheCreationInputTokens,
+		CacheReadInputTokens:       collectedUsage.CacheReadInputTokens,
+		CacheCreation5mInputTokens: collectedUsage.CacheCreation5mInputTokens,
+		CacheCreation1hInputTokens: collectedUsage.CacheCreation1hInputTokens,
+		CacheTTL:                   collectedUsage.CacheTTL,
 	}
 }
 
@@ -1205,9 +1213,9 @@ func checkResponsesEventUsage(event string, enableLog bool) (bool, bool, respons
 					usageData := extractResponsesUsageFromMap(usage)
 					needPatch := usageData.InputTokens <= 1 || usageData.OutputTokens <= 1
 
-					// 仅当检测到 Claude 原生缓存字段时，才跳过 input_tokens 补全
-					// OpenAI 的 input_tokens_details.cached_tokens 不应阻止补全
-					if usageData.HasClaudeCache && usageData.InputTokens <= 1 {
+					// 检测到缓存字段时，input_tokens <= 1 可能是正常的（扣除缓存后的可计费输入很小）
+					// Claude 缓存通过 HasClaudeCache 标记；OpenAI cached_tokens 会映射到 CacheReadInputTokens
+					if (usageData.HasClaudeCache || usageData.CacheReadInputTokens > 0) && usageData.InputTokens <= 1 {
 						needPatch = usageData.OutputTokens <= 1 // 有 Claude 缓存时只检查 output
 					}
 
@@ -1273,10 +1281,19 @@ func extractResponsesUsageFromMap(usage map[string]interface{}) responsesStreamU
 	// 检查 input_tokens_details.cached_tokens (OpenAI 格式，不设置 HasClaudeCache)
 	if details, ok := usage["input_tokens_details"].(map[string]interface{}); ok {
 		if cached, ok := details["cached_tokens"].(float64); ok && cached > 0 {
+			cachedTokens := int(cached)
+
 			// 仅当 CacheReadInputTokens 未被设置时才使用 OpenAI 的 cached_tokens
 			if data.CacheReadInputTokens == 0 {
-				data.CacheReadInputTokens = int(cached)
+				data.CacheReadInputTokens = cachedTokens
 			}
+
+			// OpenAI: input_tokens 本身包含 cached_tokens，计费时需扣除避免重复计费
+			billableInput := data.InputTokens - cachedTokens
+			if billableInput < 0 {
+				billableInput = 0
+			}
+			data.InputTokens = billableInput
 			// 注意：不设置 HasClaudeCache，因为这是 OpenAI 格式
 		}
 	}
@@ -1555,8 +1572,8 @@ func patchResponsesCompletedEventUsage(event string, requestBody []byte, outputT
 					patched := false
 
 					// 修补 input_tokens（仅当没有 Claude 原生缓存时）
-					// OpenAI 的 cached_tokens 不应阻止 input_tokens 补全
-					if collected.InputTokens <= 1 && !collected.HasClaudeCache {
+					// OpenAI cached_tokens 会被扣除到 InputTokens，避免因缓存命中导致误判为虚假值
+					if collected.InputTokens <= 1 && !collected.HasClaudeCache && collected.CacheReadInputTokens == 0 {
 						estimatedInput := utils.EstimateResponsesRequestTokens(requestBody)
 						usage["input_tokens"] = estimatedInput
 						collected.InputTokens = estimatedInput
