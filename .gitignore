@@ -198,6 +198,10 @@ Thumbs.db
 vite.config.js.timestamp-*  
 vite.config.ts.timestamp-*
 
+# Local scratch / reference repos (never commit)
+PLAN.md
+references/
+
 # Custom
 .claude/*
 !.claude/skills/

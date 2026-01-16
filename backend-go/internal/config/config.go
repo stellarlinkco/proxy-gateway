@@ -28,6 +28,7 @@ type UpstreamConfig struct {
 	Priority       int        `json:"priority"`                 // 渠道优先级（数字越小优先级越高，默认按索引）
 	Status         string     `json:"status"`                   // 渠道状态：active（正常）, suspended（暂停）, disabled（备用池）
 	PromotionUntil *time.Time `json:"promotionUntil,omitempty"` // 促销期截止时间，在此期间内优先使用此渠道（忽略trace亲和）
+	Weight         int        `json:"weight,omitempty"`         // 权重：加权随机调度时使用（默认 0/未配置视为 1）
 	LowQuality     bool       `json:"lowQuality,omitempty"`     // 低质量渠道标记：启用后强制本地估算 token，偏差>5%时使用本地值
 }
 
@@ -46,6 +47,7 @@ type UpstreamUpdate struct {
 	Priority       *int       `json:"priority"`
 	Status         *string    `json:"status"`
 	PromotionUntil *time.Time `json:"promotionUntil"`
+	Weight         *int       `json:"weight"`
 	LowQuality     *bool      `json:"lowQuality"`
 }
 

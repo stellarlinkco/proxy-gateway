@@ -185,20 +185,28 @@ func (m *URLManager) ensureChannelState(channelIndex int, urls []string) *Channe
 	return state
 }
 
-// urlsMatch 检查 URL 列表是否匹配
+// urlsMatch 检查 URL 集合是否匹配（忽略当前动态排序顺序）
+// 并同步 OriginalIdx：保证“配置顺序”变更后指标记录仍对应正确索引。
 func (m *URLManager) urlsMatch(states []*URLState, urls []string) bool {
 	if len(states) != len(urls) {
 		return false
 	}
-	urlSet := make(map[string]bool)
-	for _, url := range urls {
-		urlSet[url] = true
+
+	// 支持重复 URL：同一个 URL 可能出现多次。
+	positions := make(map[string][]int, len(urls))
+	for i, url := range urls {
+		positions[url] = append(positions[url], i)
 	}
+
 	for _, state := range states {
-		if !urlSet[state.URL] {
+		idxs, ok := positions[state.URL]
+		if !ok || len(idxs) == 0 {
 			return false
 		}
+		state.OriginalIdx = idxs[0]
+		positions[state.URL] = idxs[1:]
 	}
+
 	return true
 }
 

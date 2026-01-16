@@ -119,6 +119,9 @@ func (cm *ConfigManager) UpdateUpstream(index int, updates UpstreamUpdate) (shou
 	if updates.PromotionUntil != nil {
 		upstream.PromotionUntil = updates.PromotionUntil
 	}
+	if updates.Weight != nil {
+		upstream.Weight = *updates.Weight
+	}
 	if updates.LowQuality != nil {
 		upstream.LowQuality = *updates.LowQuality
 	}

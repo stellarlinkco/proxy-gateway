@@ -117,6 +117,9 @@ func (cm *ConfigManager) UpdateResponsesUpstream(index int, updates UpstreamUpda
 	if updates.PromotionUntil != nil {
 		upstream.PromotionUntil = updates.PromotionUntil
 	}
+	if updates.Weight != nil {
+		upstream.Weight = *updates.Weight
+	}
 	if updates.LowQuality != nil {
 		upstream.LowQuality = *updates.LowQuality
 	}
