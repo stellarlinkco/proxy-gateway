@@ -2,7 +2,7 @@
   <v-app>
     <!-- 自动认证加载提示 - 只在真正进行自动认证时显示 -->
     <v-overlay
-      :model-value="isAutoAuthenticating && !isInitialized"
+      :model-value="authStore.isAutoAuthenticating && !authStore.isInitialized"
       persistent
       class="align-center justify-center"
       scrim="black"
@@ -20,13 +20,13 @@
         <v-card-title class="text-h5 text-center mb-4"> 🔐 Claude Proxy 管理界面 </v-card-title>
 
         <v-card-text>
-          <v-alert v-if="authError" type="error" variant="tonal" class="mb-4">
-            {{ authError }}
+          <v-alert v-if="authStore.authError" type="error" variant="tonal" class="mb-4">
+            {{ authStore.authError }}
           </v-alert>
 
           <v-form @submit.prevent="handleAuthSubmit">
             <v-text-field
-              v-model="authKeyInput"
+              v-model="authStore.authKeyInput"
               label="访问密钥 (PROXY_ACCESS_KEY)"
               type="password"
               variant="outlined"
@@ -37,7 +37,7 @@
               @keyup.enter="handleAuthSubmit"
             />
 
-            <v-btn type="submit" color="primary" block size="large" class="mt-4" :loading="authLoading">
+            <v-btn type="submit" color="primary" block size="large" class="mt-4" :loading="authStore.authLoading">
               访问管理界面
             </v-btn>
           </v-form>
@@ -71,56 +71,56 @@
       <!-- 自定义标题容器 - 替代 v-app-bar-title -->
       <div class="header-title">
         <div :class="$vuetify.display.mobile ? 'text-body-2' : 'text-h6'" class="font-weight-bold d-flex align-center">
-          <span class="api-type-text" :class="{ active: activeTab === 'messages' }" @click="activeTab = 'messages'">
+          <router-link to="/channels/messages" class="api-type-text" :class="{ active: channelStore.activeTab === 'messages' }">
             Claude
-          </span>
+          </router-link>
           <span class="api-type-text separator">/</span>
-          <span class="api-type-text" :class="{ active: activeTab === 'responses' }" @click="activeTab = 'responses'">
+          <router-link to="/channels/responses" class="api-type-text" :class="{ active: channelStore.activeTab === 'responses' }">
             Codex
-          </span>
+          </router-link>
           <span class="api-type-text separator">/</span>
-          <span class="api-type-text" :class="{ active: activeTab === 'gemini' }" @click="activeTab = 'gemini'">
+          <router-link to="/channels/gemini" class="api-type-text" :class="{ active: channelStore.activeTab === 'gemini' }">
             Gemini
-          </span>
+          </router-link>
           <span class="brand-text d-none d-sm-inline">API Proxy</span>
         </div>
       </div>
 
-      <v-spacer></v-spacer>
+      <v-spacer/>
 
       <!-- 版本信息 -->
       <div
-        v-if="versionInfo.currentVersion"
+        v-if="systemStore.versionInfo.currentVersion"
         class="version-badge"
         :class="{
-          'version-clickable': versionInfo.status === 'update-available' || versionInfo.status === 'latest',
-          'version-checking': versionInfo.status === 'checking',
-          'version-latest': versionInfo.status === 'latest',
-          'version-update': versionInfo.status === 'update-available'
+          'version-clickable': systemStore.versionInfo.status === 'update-available' || systemStore.versionInfo.status === 'latest',
+          'version-checking': systemStore.versionInfo.status === 'checking',
+          'version-latest': systemStore.versionInfo.status === 'latest',
+          'version-update': systemStore.versionInfo.status === 'update-available'
         }"
         @click="handleVersionClick"
       >
         <v-icon
-          v-if="versionInfo.status === 'checking'"
+          v-if="systemStore.versionInfo.status === 'checking'"
           size="14"
           class="mr-1"
         >mdi-clock-outline</v-icon>
         <v-icon
-          v-else-if="versionInfo.status === 'latest'"
+          v-else-if="systemStore.versionInfo.status === 'latest'"
           size="14"
           class="mr-1"
           color="success"
         >mdi-check-circle</v-icon>
         <v-icon
-          v-else-if="versionInfo.status === 'update-available'"
+          v-else-if="systemStore.versionInfo.status === 'update-available'"
           size="14"
           class="mr-1"
           color="warning"
         >mdi-alert</v-icon>
-        <span class="version-text">{{ versionInfo.currentVersion }}</span>
-        <template v-if="versionInfo.status === 'update-available' && versionInfo.latestVersion">
+        <span class="version-text">{{ systemStore.versionInfo.currentVersion }}</span>
+        <template v-if="systemStore.versionInfo.status === 'update-available' && systemStore.versionInfo.latestVersion">
           <span class="version-arrow mx-1">→</span>
-          <span class="version-latest-text">{{ versionInfo.latestVersion }}</span>
+          <span class="version-latest-text">{{ systemStore.versionInfo.latestVersion }}</span>
         </template>
       </div>
 
@@ -162,13 +162,13 @@
 
       <!-- 注销按钮 -->
       <v-btn
+        v-if="isAuthenticated"
         icon
         variant="text"
         size="small"
         class="header-btn"
-        @click="handleLogout"
-        v-if="isAuthenticated"
         title="注销"
+        @click="handleLogout"
       >
         <v-icon size="20">mdi-logout</v-icon>
       </v-btn>
@@ -180,26 +180,26 @@
         <RequestMonitorView v-if="isMonitorPage" v-model:apiType="activeTab" />
         <template v-else>
         <!-- 全局统计顶部可折叠卡片（根据当前 Tab 显示对应统计） -->
-        <v-card class="mb-4 global-stats-panel" v-if="isAuthenticated">
+        <v-card v-if="isAuthenticated" class="mb-4 global-stats-panel">
           <div
             class="global-stats-header d-flex align-center justify-space-between px-4 py-2"
-            @click="showGlobalStats = !showGlobalStats"
             style="cursor: pointer;"
+            @click="preferencesStore.toggleGlobalStats()"
           >
             <div class="d-flex align-center">
               <v-icon size="20" class="mr-2">mdi-chart-areaspline</v-icon>
               <span class="text-subtitle-1 font-weight-bold">
-                {{ activeTab === 'messages' ? 'Claude Messages' : (activeTab === 'responses' ? 'Codex Responses' : 'Gemini') }} 流量统计
+                {{ channelStore.activeTab === 'messages' ? 'Claude Messages' : (channelStore.activeTab === 'responses' ? 'Codex Responses' : 'Gemini') }} 流量统计
               </span>
             </div>
             <v-btn icon size="small" variant="text">
-              <v-icon>{{ showGlobalStats ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
+              <v-icon>{{ preferencesStore.showGlobalStats ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
             </v-btn>
           </div>
           <v-expand-transition>
-            <div v-if="showGlobalStats">
+            <div v-if="preferencesStore.showGlobalStats">
               <v-divider />
-              <GlobalStatsChart :api-type="activeTab" />
+              <GlobalStatsChart :api-type="channelStore.activeTab" />
             </div>
           </v-expand-transition>
         </v-card>
@@ -212,7 +212,7 @@
                 <v-icon size="28">mdi-server-network</v-icon>
               </div>
               <div class="stat-card-content">
-                <div class="stat-card-value">{{ currentChannelsData.channels?.length || 0 }}</div>
+                <div class="stat-card-value">{{ channelStore.currentChannelsData.channels?.length || 0 }}</div>
                 <div class="stat-card-label">总渠道数</div>
                 <div class="stat-card-desc">已配置的API渠道</div>
               </div>
@@ -227,7 +227,7 @@
               </div>
               <div class="stat-card-content">
                 <div class="stat-card-value">
-                  {{ activeChannelCount }}<span class="stat-card-total">/{{ failoverChannelCount }}</span>
+                  {{ channelStore.activeChannelCount }}<span class="stat-card-total">/{{ channelStore.failoverChannelCount }}</span>
                 </div>
                 <div class="stat-card-label">活跃渠道</div>
                 <div class="stat-card-desc">参与故障转移调度</div>
@@ -237,14 +237,14 @@
           </v-col>
 
           <v-col cols="6" sm="4">
-            <div class="stat-card" :class="systemStatus === 'running' ? 'stat-card-emerald' : 'stat-card-error'">
-              <div class="stat-card-icon" :class="{ 'pulse-animation': systemStatus === 'running' }">
-                <v-icon size="28">{{ systemStatus === 'running' ? 'mdi-heart-pulse' : 'mdi-alert-circle' }}</v-icon>
+            <div class="stat-card" :class="systemStore.systemStatus === 'running' ? 'stat-card-emerald' : 'stat-card-error'">
+              <div class="stat-card-icon" :class="{ 'pulse-animation': systemStore.systemStatus === 'running' }">
+                <v-icon size="28">{{ systemStore.systemStatus === 'running' ? 'mdi-heart-pulse' : 'mdi-alert-circle' }}</v-icon>
               </div>
               <div class="stat-card-content">
-                <div class="stat-card-value">{{ systemStatusText }}</div>
+                <div class="stat-card-value">{{ systemStore.systemStatusText }}</div>
                 <div class="stat-card-label">系统状态</div>
-                <div class="stat-card-desc">{{ systemStatusDesc }}</div>
+                <div class="stat-card-desc">{{ systemStore.systemStatusDesc }}</div>
               </div>
               <div class="stat-card-glow"></div>
             </div>
@@ -257,9 +257,9 @@
             <v-btn
               color="primary"
               size="large"
-              @click="openAddChannelModal"
               prepend-icon="mdi-plus"
               class="action-btn action-btn-primary"
+              @click="openAddChannelModal"
             >
               添加渠道
             </v-btn>
@@ -267,16 +267,16 @@
             <v-btn
               color="info"
               size="large"
-              @click="pingAllChannels"
               prepend-icon="mdi-speedometer"
               variant="tonal"
-              :loading="isPingingAll"
+              :loading="channelStore.isPingingAll"
               class="action-btn"
+              @click="pingAllChannels"
             >
               测试延迟
             </v-btn>
 
-            <v-btn size="large" @click="refreshChannels" prepend-icon="mdi-refresh" variant="text" class="action-btn">
+            <v-btn size="large" prepend-icon="mdi-refresh" variant="text" class="action-btn" @click="refreshChannels">
               刷新
             </v-btn>
           </div>
@@ -284,48 +284,40 @@
           <div class="action-bar-right">
             <!-- Fuzzy 模式切换按钮 -->
             <v-tooltip location="bottom" content-class="fuzzy-tooltip">
-              <template v-slot:activator="{ props }">
+              <template #activator="{ props }">
                 <v-btn
                   v-bind="props"
                   variant="tonal"
                   size="large"
-                  @click="toggleFuzzyMode"
-                  :loading="fuzzyModeLoading"
-                  :disabled="fuzzyModeLoadError"
-                  :color="fuzzyModeLoadError ? 'error' : (fuzzyModeEnabled ? 'warning' : 'default')"
+                  :loading="systemStore.fuzzyModeLoading"
+                  :disabled="systemStore.fuzzyModeLoadError"
+                  :color="systemStore.fuzzyModeLoadError ? 'error' : (preferencesStore.fuzzyModeEnabled ? 'warning' : 'default')"
                   class="action-btn"
+                  @click="toggleFuzzyMode"
                 >
                   <v-icon start size="20">
-                    {{ fuzzyModeLoadError ? 'mdi-alert-circle-outline' : (fuzzyModeEnabled ? 'mdi-shield-refresh' : 'mdi-shield-off-outline') }}
+                    {{ systemStore.fuzzyModeLoadError ? 'mdi-alert-circle-outline' : (preferencesStore.fuzzyModeEnabled ? 'mdi-shield-refresh' : 'mdi-shield-off-outline') }}
                   </v-icon>
                   Fuzzy
                 </v-btn>
               </template>
-              <span>{{ fuzzyModeLoadError ? '加载失败，请刷新页面' : (fuzzyModeEnabled ? 'Fuzzy 模式已启用：模糊处理错误，自动尝试所有渠道' : 'Fuzzy 模式已关闭：精确处理错误，透传上游响应') }}</span>
+              <span>{{ systemStore.fuzzyModeLoadError ? '加载失败，请刷新页面' : (preferencesStore.fuzzyModeEnabled ? 'Fuzzy 模式已启用：模糊处理错误，自动尝试所有渠道' : 'Fuzzy 模式已关闭：精确处理错误，透传上游响应') }}</span>
             </v-tooltip>
           </div>
         </div>
 
         <!-- 渠道编排（高密度列表模式） -->
-        <ChannelOrchestration
-          v-if="currentChannelsData.channels?.length"
-          ref="channelOrchestrationRef"
-          :channels="currentChannelsData.channels"
-          :current-channel-index="currentChannelsData.current ?? 0"
-          :channel-type="activeTab"
-          :dashboard-metrics="dashboardMetrics"
-          :dashboard-stats="dashboardStats"
+        <router-view
           @edit="editChannel"
           @delete="deleteChannel"
           @ping="pingChannel"
           @refresh="refreshChannels"
           @error="showErrorToast"
           @success="showSuccessToast"
-          class="mb-6"
         />
 
         <!-- 空状态 -->
-        <v-card v-if="!currentChannelsData.channels?.length" elevation="2" class="text-center pa-12" rounded="lg">
+        <v-card v-if="!channelStore.currentChannelsData.channels?.length" elevation="2" class="text-center pa-12" rounded="lg">
           <v-avatar size="120" color="primary" class="mb-6">
             <v-icon size="60" color="white">mdi-rocket-launch</v-icon>
           </v-avatar>
@@ -333,24 +325,24 @@
           <div class="text-subtitle-1 text-medium-emphasis mb-8">
             还没有配置任何API渠道，请添加第一个渠道来开始使用代理服务
           </div>
-	          <v-btn color="primary" size="x-large" @click="openAddChannelModal" prepend-icon="mdi-plus" variant="elevated">
-	            添加第一个渠道
-	          </v-btn>
-	        </v-card>
+          <v-btn color="primary" size="x-large" @click="openAddChannelModal" prepend-icon="mdi-plus" variant="elevated">
+            添加第一个渠道
+          </v-btn>
+        </v-card>
         </template>
       </v-container>
     </v-main>
 
     <!-- 添加渠道模态框 -->
     <AddChannelModal
-      v-model:show="showAddChannelModal"
-      :channel="editingChannel"
-      :channel-type="activeTab"
+      v-model:show="dialogStore.showAddChannelModal"
+      :channel="dialogStore.editingChannel"
+      :channel-type="channelStore.activeTab"
       @save="saveChannel"
     />
 
     <!-- 添加API密钥对话框 -->
-    <v-dialog v-model="showAddKeyModalRef" max-width="500">
+    <v-dialog v-model="dialogStore.showAddKeyModal" max-width="500">
       <v-card rounded="lg">
         <v-card-title class="d-flex align-center">
           <v-icon class="mr-3">mdi-key-plus</v-icon>
@@ -358,19 +350,19 @@
         </v-card-title>
         <v-card-text>
           <v-text-field
-            v-model="newApiKey"
+            v-model="dialogStore.newApiKey"
             label="API密钥"
             type="password"
             variant="outlined"
             density="comfortable"
-            @keyup.enter="addApiKey"
             placeholder="输入API密钥"
-          ></v-text-field>
+            @keyup.enter="addApiKey"
+          />
         </v-card-text>
         <v-card-actions>
-          <v-spacer></v-spacer>
-          <v-btn @click="showAddKeyModalRef = false" variant="text">取消</v-btn>
-          <v-btn @click="addApiKey" :disabled="!newApiKey.trim()" color="primary" variant="elevated">添加</v-btn>
+          <v-spacer/>
+          <v-btn variant="text" @click="dialogStore.closeAddKeyModal()">取消</v-btn>
+          <v-btn :disabled="!dialogStore.newApiKey.trim()" color="primary" variant="elevated" @click="addApiKey">添加</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
@@ -396,10 +388,14 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useTheme } from 'vuetify'
-import { api, fetchHealth, type Channel, type ChannelsResponse, type ChannelMetrics, type ChannelDashboardResponse } from './services/api'
-import { versionService, type VersionInfo } from './services/version'
+import { api, fetchHealth, ApiError, type Channel } from './services/api'
+import { versionService } from './services/version'
+import { useAuthStore } from './stores/auth'
+import { useChannelStore } from './stores/channel'
+import { usePreferencesStore } from './stores/preferences'
+import { useDialogStore } from './stores/dialog'
+import { useSystemStore } from './stores/system'
 import AddChannelModal from './components/AddChannelModal.vue'
-import ChannelOrchestration from './components/ChannelOrchestration.vue'
 import GlobalStatsChart from './components/GlobalStatsChart.vue'
 import { useAppTheme } from './composables/useTheme'
 import RequestMonitorView from './views/RequestMonitorView.vue'
@@ -409,6 +405,9 @@ const theme = useTheme()
 
 // 应用主题系统
 const { init: initTheme } = useAppTheme()
+
+// 认证 Store
+const authStore = useAuthStore()
 
 // 轻量级页面路由：只需要 / 与 /monitor 两页，没必要引入 vue-router
 const currentPath = ref(window.location.pathname)
@@ -432,62 +431,23 @@ function toggleMonitorPage() {
 // 渠道编排组件引用
 const channelOrchestrationRef = ref<InstanceType<typeof ChannelOrchestration> | null>(null)
 
-// 自动刷新定时器
-let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
-const AUTO_REFRESH_INTERVAL = 2000 // 2秒
+// 渠道 Store
+const channelStore = useChannelStore()
 
-// 响应式数据
-const activeTab = ref<'messages' | 'responses' | 'gemini'>('messages') // Tab 切换状态
-const channelsData = ref<ChannelsResponse>({ channels: [], current: -1, loadBalance: 'round-robin' })
-const responsesChannelsData = ref<ChannelsResponse>({ channels: [], current: -1, loadBalance: 'round-robin' }) // Responses渠道数据
-const geminiChannelsData = ref<ChannelsResponse>({ channels: [], current: -1, loadBalance: 'round-robin' }) // Gemini渠道数据
-// Dashboard 数据（合并的 metrics 和 stats）
-const dashboardMetrics = ref<ChannelMetrics[]>([])
-const dashboardStats = ref<ChannelDashboardResponse['stats'] | undefined>(undefined)
-const showAddChannelModal = ref(false)
-const showAddKeyModalRef = ref(false)
-const editingChannel = ref<Channel | null>(null)
-const selectedChannelForKey = ref<number>(-1)
-const newApiKey = ref('')
-const isPingingAll = ref(false)
-const darkModePreference = ref<'light' | 'dark' | 'auto'>('auto')
+// 偏好设置 Store
+const preferencesStore = usePreferencesStore()
 
-// 全局统计面板状态
-const showGlobalStats = ref(false) // 顶部可折叠卡片（默认收起）
+// 对话框 Store
+const dialogStore = useDialogStore()
 
-// Fuzzy 模式状态
-const fuzzyModeEnabled = ref(true)
-const fuzzyModeLoading = ref(false)
+// 系统状态 Store
+const systemStore = useSystemStore()
 
-// 系统连接状态
-type SystemStatus = 'running' | 'error' | 'connecting'
-const systemStatus = ref<SystemStatus>('connecting')
-const systemStatusText = computed(() => {
-  switch (systemStatus.value) {
-    case 'running': return '运行中'
-    case 'error': return '连接失败'
-    case 'connecting': return '连接中...'
-  }
-})
-const systemStatusDesc = computed(() => {
-  switch (systemStatus.value) {
-    case 'running': return '服务正常运行'
-    case 'error': return '无法连接后端'
-    case 'connecting': return '正在检测服务...'
-  }
-})
+// 对话框状态已迁移到 DialogStore
 
-// 版本信息
-const versionInfo = ref<VersionInfo>({
-  currentVersion: '',
-  latestVersion: null,
-  isLatest: false,
-  hasUpdate: false,
-  releaseUrl: null,
-  lastCheckTime: 0,
-  status: 'checking'
-})
-const isCheckingVersion = ref(false)
+// 主题和偏好设置已迁移到 PreferencesStore
+
+// 系统状态已迁移到 SystemStore
 
 // Toast通知系统
 interface Toast {
@@ -498,29 +458,6 @@ interface Toast {
 }
 const toasts = ref<Toast[]>([])
 let toastId = 0
-
-// 计算属性 - 根据当前Tab动态返回数据
-const currentChannelsData = computed(() => {
-  switch (activeTab.value) {
-    case 'messages': return channelsData.value
-    case 'responses': return responsesChannelsData.value
-    case 'gemini': return geminiChannelsData.value
-  }
-})
-
-// 计算属性：活跃渠道数（仅 active 状态）
-const activeChannelCount = computed(() => {
-  const data = currentChannelsData.value
-  if (!data.channels) return 0
-  return data.channels.filter(ch => ch.status === 'active').length
-})
-
-// 计算属性：参与故障转移的渠道数（active + suspended）
-const failoverChannelCount = computed(() => {
-  const data = currentChannelsData.value
-  if (!data.channels) return 0
-  return data.channels.filter(ch => ch.status !== 'disabled').length
-})
 
 // Toast工具函数
 const getToastColor = (type: string) => {
@@ -553,7 +490,7 @@ const showToast = (message: string, type: 'success' | 'error' | 'warning' | 'inf
   }, 3000)
 }
 
-const handleError = (error: unknown, defaultMessage: string) => {
+const _handleError = (error: unknown, defaultMessage: string) => {
   const message = error instanceof Error ? error.message : defaultMessage
   showToast(message, 'error')
   console.error(error)
@@ -569,63 +506,10 @@ const showSuccessToast = (message: string) => {
   showToast(message, 'info')
 }
 
-// 合并渠道数据，保留本地的延迟测试结果
-const LATENCY_VALID_DURATION = 5 * 60 * 1000 // 5 分钟有效期
-
-const mergeChannelsWithLocalData = (newChannels: Channel[], existingChannels: Channel[] | undefined): Channel[] => {
-  if (!existingChannels) return newChannels
-
-  const now = Date.now()
-  return newChannels.map(newCh => {
-    const existingCh = existingChannels.find(ch => ch.index === newCh.index)
-    // 只有在 5 分钟有效期内才保留本地延迟测试结果
-    if (existingCh?.latencyTestTime && (now - existingCh.latencyTestTime) < LATENCY_VALID_DURATION) {
-      return {
-        ...newCh,
-        latency: existingCh.latency,
-        latencyTestTime: existingCh.latencyTestTime
-      }
-    }
-    return newCh
-  })
-}
-
-// 主要功能函数
+// 主要功能函数 - 使用 ChannelStore
 const refreshChannels = async () => {
   try {
-    // Gemini 使用专用的 dashboard API（降级实现）
-    if (activeTab.value === 'gemini') {
-      const dashboard = await api.getGeminiChannelDashboard()
-      geminiChannelsData.value = {
-        channels: mergeChannelsWithLocalData(dashboard.channels, geminiChannelsData.value.channels),
-        current: geminiChannelsData.value.current,
-        loadBalance: dashboard.loadBalance
-      }
-      dashboardMetrics.value = dashboard.metrics
-      dashboardStats.value = dashboard.stats
-      return
-    }
-
-    // Messages / Responses 使用合并的 dashboard 接口
-    const dashboard = await api.getChannelDashboard(activeTab.value)
-
-    if (activeTab.value === 'messages') {
-      channelsData.value = {
-        channels: mergeChannelsWithLocalData(dashboard.channels, channelsData.value.channels),
-        current: channelsData.value.current, // 保留当前选中状态
-        loadBalance: dashboard.loadBalance
-      }
-    } else {
-      responsesChannelsData.value = {
-        channels: mergeChannelsWithLocalData(dashboard.channels, responsesChannelsData.value.channels),
-        current: responsesChannelsData.value.current, // 保留当前选中状态
-        loadBalance: dashboard.loadBalance
-      }
-    }
-
-    // 同时更新 metrics 和 stats
-    dashboardMetrics.value = dashboard.metrics
-    dashboardStats.value = dashboard.stats
+    await channelStore.refreshChannels()
   } catch (error) {
     handleAuthError(error)
   }
@@ -633,73 +517,12 @@ const refreshChannels = async () => {
 
 const saveChannel = async (channel: Omit<Channel, 'index' | 'latency' | 'status'>, options?: { isQuickAdd?: boolean }) => {
   try {
-    const isResponses = activeTab.value === 'responses'
-    const isGemini = activeTab.value === 'gemini'
-    if (editingChannel.value) {
-      if (isGemini) {
-        await api.updateGeminiChannel(editingChannel.value.index, channel)
-      } else if (isResponses) {
-        await api.updateResponsesChannel(editingChannel.value.index, channel)
-      } else {
-        await api.updateChannel(editingChannel.value.index, channel)
-      }
-      showToast('渠道更新成功', 'success')
-    } else {
-      if (isGemini) {
-        await api.addGeminiChannel(channel)
-      } else if (isResponses) {
-        await api.addResponsesChannel(channel)
-      } else {
-        await api.addChannel(channel)
-      }
-      showToast('渠道添加成功', 'success')
-
-      // 快速添加模式：将新渠道设为第一优先级并设置5分钟促销期
-      if (options?.isQuickAdd) {
-        await refreshChannels() // 先刷新获取新渠道的 index
-        const data = isGemini ? geminiChannelsData.value : (isResponses ? responsesChannelsData.value : channelsData.value)
-
-        // 找到新添加的渠道（应该是列表中 index 最大的 active 状态渠道）
-        const activeChannels = data.channels?.filter(ch => ch.status !== 'disabled') || []
-        if (activeChannels.length > 0) {
-          // 新添加的渠道会分配到最大的 index
-          const newChannel = activeChannels.reduce((max, ch) => ch.index > max.index ? ch : max, activeChannels[0])
-
-          try {
-            // 1. 重新排序：将新渠道放到第一位
-            const otherIndexes = activeChannels
-              .filter(ch => ch.index !== newChannel.index)
-              .sort((a, b) => (a.priority ?? a.index) - (b.priority ?? b.index))
-              .map(ch => ch.index)
-            const newOrder = [newChannel.index, ...otherIndexes]
-
-            if (isGemini) {
-              await api.reorderGeminiChannels(newOrder)
-            } else if (isResponses) {
-              await api.reorderResponsesChannels(newOrder)
-            } else {
-              await api.reorderChannels(newOrder)
-            }
-
-            // 2. 设置5分钟促销期（300秒）
-            if (isGemini) {
-              await api.setGeminiChannelPromotion(newChannel.index, 300)
-            } else if (isResponses) {
-              await api.setResponsesChannelPromotion(newChannel.index, 300)
-            } else {
-              await api.setChannelPromotion(newChannel.index, 300)
-            }
-
-            showToast(`渠道 ${channel.name} 已设为最高优先级，5分钟内优先使用`, 'info')
-          } catch (err) {
-            console.warn('设置快速添加优先级失败:', err)
-            // 不影响主流程，只是提示
-          }
-        }
-      }
+    const result = await channelStore.saveChannel(channel, dialogStore.editingChannel?.index ?? null, options)
+    showToast(result.message, 'success')
+    if (result.quickAddMessage) {
+      showToast(result.quickAddMessage, 'info')
     }
-    showAddChannelModal.value = false
-    editingChannel.value = null
+    dialogStore.closeAddChannelModal()
     await refreshChannels()
   } catch (error) {
     handleAuthError(error)
@@ -707,66 +530,54 @@ const saveChannel = async (channel: Omit<Channel, 'index' | 'latency' | 'status'
 }
 
 const editChannel = (channel: Channel) => {
-  editingChannel.value = channel
-  showAddChannelModal.value = true
+  dialogStore.openEditChannelModal(channel)
 }
 
 const deleteChannel = async (channelId: number) => {
   if (!confirm('确定要删除这个渠道吗？')) return
 
   try {
-    if (activeTab.value === 'gemini') {
-      await api.deleteGeminiChannel(channelId)
-    } else if (activeTab.value === 'responses') {
-      await api.deleteResponsesChannel(channelId)
-    } else {
-      await api.deleteChannel(channelId)
-    }
-    showToast('渠道删除成功', 'success')
-    await refreshChannels()
+    const result = await channelStore.deleteChannel(channelId)
+    showToast(result.message, 'success')
   } catch (error) {
     handleAuthError(error)
   }
 }
 
 const openAddChannelModal = () => {
-  editingChannel.value = null
-  showAddChannelModal.value = true
+  dialogStore.openAddChannelModal()
 }
 
-const openAddKeyModal = (channelId: number) => {
-  selectedChannelForKey.value = channelId
-  newApiKey.value = ''
-  showAddKeyModalRef.value = true
+const _openAddKeyModal = (channelId: number) => {
+  dialogStore.openAddKeyModal(channelId)
 }
 
 const addApiKey = async () => {
-  if (!newApiKey.value.trim()) return
+  if (!dialogStore.newApiKey.trim()) return
 
   try {
-    if (activeTab.value === 'gemini') {
-      await api.addGeminiApiKey(selectedChannelForKey.value, newApiKey.value.trim())
-    } else if (activeTab.value === 'responses') {
-      await api.addResponsesApiKey(selectedChannelForKey.value, newApiKey.value.trim())
+    if (channelStore.activeTab === 'gemini') {
+      await api.addGeminiApiKey(dialogStore.selectedChannelForKey, dialogStore.newApiKey.trim())
+    } else if (channelStore.activeTab === 'responses') {
+      await api.addResponsesApiKey(dialogStore.selectedChannelForKey, dialogStore.newApiKey.trim())
     } else {
-      await api.addApiKey(selectedChannelForKey.value, newApiKey.value.trim())
+      await api.addApiKey(dialogStore.selectedChannelForKey, dialogStore.newApiKey.trim())
     }
     showToast('API密钥添加成功', 'success')
-    showAddKeyModalRef.value = false
-    newApiKey.value = ''
+    dialogStore.closeAddKeyModal()
     await refreshChannels()
   } catch (error) {
     showToast(`添加API密钥失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error')
   }
 }
 
-const removeApiKey = async (channelId: number, apiKey: string) => {
+const _removeApiKey = async (channelId: number, apiKey: string) => {
   if (!confirm('确定要删除这个API密钥吗？')) return
 
   try {
-    if (activeTab.value === 'gemini') {
+    if (channelStore.activeTab === 'gemini') {
       await api.removeGeminiApiKey(channelId, apiKey)
-    } else if (activeTab.value === 'responses') {
+    } else if (channelStore.activeTab === 'responses') {
       await api.removeResponsesApiKey(channelId, apiKey)
     } else {
       await api.removeApiKey(channelId, apiKey)
@@ -780,18 +591,7 @@ const removeApiKey = async (channelId: number, apiKey: string) => {
 
 const pingChannel = async (channelId: number) => {
   try {
-    const result = activeTab.value === 'gemini'
-      ? await api.pingGeminiChannel(channelId)
-      : await api.pingChannel(channelId)
-    const data = activeTab.value === 'gemini'
-      ? geminiChannelsData.value
-      : (activeTab.value === 'messages' ? channelsData.value : responsesChannelsData.value)
-    const channel = data.channels?.find(c => c.index === channelId)
-    if (channel) {
-      channel.latency = result.latency
-      channel.latencyTestTime = Date.now()  // 记录测试时间，用于 5 分钟后清除
-      channel.status = result.success ? 'healthy' : 'error'
-    }
+    await channelStore.pingChannel(channelId)
     // 不再使用 Toast，延迟结果直接显示在渠道列表中
   } catch (error) {
     showToast(`延迟测试失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error')
@@ -799,92 +599,62 @@ const pingChannel = async (channelId: number) => {
 }
 
 const pingAllChannels = async () => {
-  if (isPingingAll.value) return
-
-  isPingingAll.value = true
   try {
-    const results = activeTab.value === 'gemini'
-      ? await api.pingAllGeminiChannels()
-      : await api.pingAllChannels()
-    const data = activeTab.value === 'gemini'
-      ? geminiChannelsData.value
-      : (activeTab.value === 'messages' ? channelsData.value : responsesChannelsData.value)
-    const now = Date.now()
-    results.forEach(result => {
-      const channel = data.channels?.find(c => c.index === result.id)
-      if (channel) {
-        channel.latency = result.latency
-        channel.latencyTestTime = now  // 记录测试时间，用于 5 分钟后清除
-        channel.status = result.status as 'healthy' | 'error'
-      }
-    })
+    await channelStore.pingAllChannels()
     // 不再使用 Toast，延迟结果直接显示在渠道列表中
   } catch (error) {
     showToast(`批量延迟测试失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error')
-  } finally {
-    isPingingAll.value = false
   }
 }
 
-const updateLoadBalance = async (strategy: string) => {
+const _updateLoadBalance = async (strategy: string) => {
   try {
-    if (activeTab.value === 'gemini') {
-      await api.updateGeminiLoadBalance(strategy)
-      geminiChannelsData.value.loadBalance = strategy
-    } else if (activeTab.value === 'messages') {
-      await api.updateLoadBalance(strategy)
-      channelsData.value.loadBalance = strategy
-    } else {
-      await api.updateResponsesLoadBalance(strategy)
-      responsesChannelsData.value.loadBalance = strategy
-    }
-    showToast(`负载均衡策略已更新为: ${strategy}`, 'success')
+    const result = await channelStore.updateLoadBalance(strategy)
+    showToast(result.message, 'success')
   } catch (error) {
     showToast(`更新负载均衡策略失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error')
   }
 }
 
 // Fuzzy 模式管理
-const fuzzyModeLoadError = ref(false) // 加载失败标记
-
 const loadFuzzyModeStatus = async () => {
-  fuzzyModeLoadError.value = false
+  systemStore.setFuzzyModeLoadError(false)
   try {
     const { fuzzyModeEnabled: enabled } = await api.getFuzzyMode()
-    fuzzyModeEnabled.value = enabled
+    preferencesStore.setFuzzyMode(enabled)
   } catch (e) {
     console.error('Failed to load fuzzy mode status:', e)
-    fuzzyModeLoadError.value = true
+    systemStore.setFuzzyModeLoadError(true)
     // 加载失败时不使用默认值，保持 UI 显示未知状态
     showToast('加载 Fuzzy 模式状态失败，请刷新页面重试', 'warning')
   }
 }
 
 const toggleFuzzyMode = async () => {
-  if (fuzzyModeLoadError.value) {
+  if (systemStore.fuzzyModeLoadError) {
     showToast('Fuzzy 模式状态未知，请先刷新页面', 'warning')
     return
   }
-  fuzzyModeLoading.value = true
+  systemStore.setFuzzyModeLoading(true)
   try {
-    await api.setFuzzyMode(!fuzzyModeEnabled.value)
-    fuzzyModeEnabled.value = !fuzzyModeEnabled.value
-    showToast(`Fuzzy 模式已${fuzzyModeEnabled.value ? '启用' : '关闭'}`, 'success')
+    await api.setFuzzyMode(!preferencesStore.fuzzyModeEnabled)
+    preferencesStore.toggleFuzzyMode()
+    showToast(`Fuzzy 模式已${preferencesStore.fuzzyModeEnabled ? '启用' : '关闭'}`, 'success')
   } catch (e) {
     showToast(`切换 Fuzzy 模式失败: ${e instanceof Error ? e.message : '未知错误'}`, 'error')
   } finally {
-    fuzzyModeLoading.value = false
+    systemStore.setFuzzyModeLoading(false)
   }
 }
 
 // 主题管理
 const toggleDarkMode = () => {
-  const newMode = darkModePreference.value === 'dark' ? 'light' : 'dark'
+  const newMode = preferencesStore.darkModePreference === 'dark' ? 'light' : 'dark'
   setDarkMode(newMode)
 }
 
 const setDarkMode = (themeName: 'light' | 'dark' | 'auto') => {
-  darkModePreference.value = themeName
+  preferencesStore.setDarkMode(themeName)
   const apply = (isDark: boolean) => {
     // 使用 Vuetify 3.9+ 推荐的 theme.change() API
     theme.change(isDark ? 'dark' : 'light')
@@ -896,46 +666,33 @@ const setDarkMode = (themeName: 'light' | 'dark' | 'auto') => {
   } else {
     apply(themeName === 'dark')
   }
-
-  localStorage.setItem('theme', themeName)
+  // PreferencesStore 已通过 pinia-plugin-persistedstate 自动持久化，无需手动写入 localStorage
 }
 
-// 认证状态管理
-const isAuthenticated = ref(false)
-const authError = ref('')
-const authKeyInput = ref('')
-const authLoading = ref(false)
-const isAutoAuthenticating = ref(true) // 初始化为true，防止登录框闪现
-const isInitialized = ref(false) // 添加初始化完成标志
+// 认证状态管理（使用 AuthStore）
+const isAuthenticated = computed(() => authStore.isAuthenticated)
+// 认证相关状态已迁移到 AuthStore
 
 // 认证尝试限制
-const authAttempts = ref(0)
 const MAX_AUTH_ATTEMPTS = 5
-const authLockoutTime = ref<Date | null>(null)
 
 // 控制认证对话框显示
 const showAuthDialog = computed({
   get: () => {
     // 只有在初始化完成后，且未认证，且不在自动认证中时，才显示对话框
-    return isInitialized.value && !isAuthenticated.value && !isAutoAuthenticating.value
+    return authStore.isInitialized && !isAuthenticated.value && !authStore.isAutoAuthenticating
   },
   set: () => {} // 防止外部修改，认证状态只能通过内部逻辑控制
 })
 
-// 初始化认证 - 只负责从存储获取密钥
-const initializeAuth = () => {
-  const key = api.initializeAuth()
-  return key
-}
-
 // 自动验证保存的密钥
 const autoAuthenticate = async () => {
-  const savedKey = initializeAuth()
-  if (!savedKey) {
+  // 检查 AuthStore 中是否有保存的密钥
+  if (!authStore.apiKey) {
     // 没有保存的密钥，显示登录对话框
-    authError.value = '请输入访问密钥以继续'
-    isAutoAuthenticating.value = false
-    isInitialized.value = true
+    authStore.setAuthError('请输入访问密钥以继续')
+    authStore.setAutoAuthenticating(false)
+    authStore.setInitialized(true)
     return false
   }
 
@@ -944,112 +701,109 @@ const autoAuthenticate = async () => {
     // 尝试调用API验证密钥是否有效
     await api.getChannels()
 
-    // 密钥有效，设置认证状态
-    isAuthenticated.value = true
-    authError.value = ''
-
+    // 密钥有效，认证成功
+    authStore.setAuthError('')
     return true
-  } catch (error: any) {
-    // 密钥无效或过期
-    console.warn('自动认证失败:', error.message)
+  } catch (error) {
+    // 仅在明确 401 时视为密钥无效；其他错误（网络/5xx）不应清除密钥
+    if (error instanceof ApiError && error.status === 401) {
+      console.warn('自动认证失败: 认证失败(401)')
+      authStore.clearAuth()
+      authStore.setAuthError('保存的访问密钥已失效，请重新输入')
+      return false
+    }
 
-    // 清除无效的密钥
-    api.clearAuth()
-
-    // 显示登录对话框，提示用户重新输入
-    isAuthenticated.value = false
-    authError.value = '保存的访问密钥已失效，请重新输入'
-
-    return false
+    console.warn('自动认证暂时失败:', error)
+    showToast(`无法验证访问密钥: ${error instanceof Error ? error.message : '未知错误'}`, 'warning')
+    // 非 401：保留密钥，继续尝试连接后端（后续刷新会更新系统状态）
+    return true
   } finally {
-    isAutoAuthenticating.value = false
-    isInitialized.value = true
+    authStore.setAutoAuthenticating(false)
+    authStore.setInitialized(true)
   }
 }
 
 // 手动设置密钥（用于重新认证）
 const setAuthKey = (key: string) => {
-  api.setApiKey(key)
-  localStorage.setItem('proxyAccessKey', key)
-  isAuthenticated.value = true
-  authError.value = ''
-  // 重新加载数据
-  refreshChannels()
+  authStore.setApiKey(key)
+  authStore.setAuthError('')
 }
 
 // 处理认证提交
 const handleAuthSubmit = async () => {
-  if (!authKeyInput.value.trim()) {
-    authError.value = '请输入访问密钥'
+  if (!authStore.authKeyInput.trim()) {
+    authStore.setAuthError('请输入访问密钥')
     return
   }
 
   // 检查是否被锁定
-  if (authLockoutTime.value && new Date() < authLockoutTime.value) {
-    const remainingSeconds = Math.ceil((authLockoutTime.value.getTime() - Date.now()) / 1000)
-    authError.value = `认证尝试次数过多，请在 ${remainingSeconds} 秒后重试`
+  if (authStore.isAuthLocked) {
+    const remainingSeconds = Math.ceil((authStore.authLockoutTime! - Date.now()) / 1000)
+    authStore.setAuthError(`认证尝试次数过多，请在 ${remainingSeconds} 秒后重试`)
     return
   }
 
-  authLoading.value = true
-  authError.value = ''
+  authStore.setAuthLoading(true)
+  authStore.setAuthError('')
 
   try {
     // 设置密钥
-    setAuthKey(authKeyInput.value.trim())
+    setAuthKey(authStore.authKeyInput.trim())
 
     // 测试API调用以验证密钥
     await api.getChannels()
 
     // 认证成功，重置计数器
-    authAttempts.value = 0
-    authLockoutTime.value = null
+    authStore.resetAuthAttempts()
+    authStore.setAuthLockout(null)
 
     // 如果成功，加载数据
     await refreshChannels()
 
-    authKeyInput.value = ''
+    authStore.setAuthKeyInput('')
 
     // 记录认证成功(前端日志)
     if (import.meta.env.DEV) {
       console.info('✅ 认证成功 - 时间:', new Date().toISOString())
     }
-  } catch (error: any) {
-    // 认证失败
-    authAttempts.value++
+  } catch (error) {
+    // 仅在明确 401 时计入认证失败；网络/5xx 不计入失败次数，也不清除已保存密钥
+    if (error instanceof ApiError && error.status === 401) {
+      authStore.incrementAuthAttempts()
 
-    // 记录认证失败(前端日志)
-    console.warn('🔒 认证失败 - 尝试次数:', authAttempts.value, '时间:', new Date().toISOString())
+      // 记录认证失败(前端日志)
+      console.warn('🔒 认证失败 - 尝试次数:', authStore.authAttempts, '时间:', new Date().toISOString())
 
-    // 如果尝试次数过多，锁定5分钟
-    if (authAttempts.value >= MAX_AUTH_ATTEMPTS) {
-      authLockoutTime.value = new Date(Date.now() + 5 * 60 * 1000)
-      authError.value = '认证尝试次数过多，请在5分钟后重试'
-    } else {
-      authError.value = `访问密钥验证失败 (剩余尝试次数: ${MAX_AUTH_ATTEMPTS - authAttempts.value})`
+      // 如果尝试次数过多，锁定5分钟
+      if (authStore.authAttempts >= MAX_AUTH_ATTEMPTS) {
+        authStore.setAuthLockout(new Date(Date.now() + 5 * 60 * 1000))
+        authStore.setAuthError('认证尝试次数过多，请在5分钟后重试')
+      } else {
+        authStore.setAuthError(`访问密钥验证失败 (剩余尝试次数: ${MAX_AUTH_ATTEMPTS - authStore.authAttempts})`)
+      }
+
+      authStore.clearAuth()
+      return
     }
 
-    isAuthenticated.value = false
-    api.clearAuth()
+    showToast(`无法验证访问密钥: ${error instanceof Error ? error.message : '未知错误'}`, 'error')
   } finally {
-    authLoading.value = false
+    authStore.setAuthLoading(false)
   }
 }
 
 // 处理注销
 const handleLogout = () => {
-  api.clearAuth()
-  isAuthenticated.value = false
-  authError.value = '请输入访问密钥以继续'
-  channelsData.value = { channels: [], current: 0, loadBalance: 'failover' }
+  authStore.clearAuth()
+  channelStore.clearChannels()
+  authStore.setAuthError('请输入访问密钥以继续')
   showToast('已安全注销', 'info')
 }
 
 // 处理认证失败
 const handleAuthError = (error: any) => {
   if (error.message && error.message.includes('认证失败')) {
-    isAuthenticated.value = false
-    authError.value = '访问密钥无效或已过期，请重新输入'
+    authStore.setAuthError('访问密钥无效或已过期，请重新输入')
   } else {
     showToast(`操作失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error')
   }
@@ -1057,9 +811,9 @@ const handleAuthError = (error: any) => {
 
 // 版本检查
 const checkVersion = async () => {
-  if (isCheckingVersion.value) return
+  if (systemStore.isCheckingVersion) return
 
-  isCheckingVersion.value = true
+  systemStore.setCheckingVersion(true)
   try {
     // 先获取当前版本
     const health = await fetchHealth()
@@ -1067,29 +821,35 @@ const checkVersion = async () => {
 
     if (currentVersion) {
       versionService.setCurrentVersion(currentVersion)
-      versionInfo.value.currentVersion = currentVersion
+      systemStore.setCurrentVersion(currentVersion)
 
       // 检查 GitHub 最新版本
       const result = await versionService.checkForUpdates()
-      versionInfo.value = result
+      systemStore.setVersionInfo(result)
     } else {
-      versionInfo.value.status = 'error'
+      systemStore.setVersionInfo({
+        ...systemStore.versionInfo,
+        status: 'error',
+      })
     }
   } catch (error) {
     console.warn('Version check failed:', error)
-    versionInfo.value.status = 'error'
+    systemStore.setVersionInfo({
+      ...systemStore.versionInfo,
+      status: 'error',
+    })
   } finally {
-    isCheckingVersion.value = false
+    systemStore.setCheckingVersion(false)
   }
 }
 
 // 版本点击处理
 const handleVersionClick = () => {
   if (
-    (versionInfo.value.status === 'update-available' || versionInfo.value.status === 'latest') &&
-    versionInfo.value.releaseUrl
+    (systemStore.versionInfo.status === 'update-available' || systemStore.versionInfo.status === 'latest') &&
+    systemStore.versionInfo.releaseUrl
   ) {
-    window.open(versionInfo.value.releaseUrl, '_blank', 'noopener,noreferrer')
+    window.open(systemStore.versionInfo.releaseUrl, '_blank', 'noopener,noreferrer')
   }
 }
 
@@ -1100,31 +860,28 @@ onMounted(async () => {
   document.documentElement.dataset.theme = 'retro'
   initTheme()
 
-  // 加载保存的暗色模式偏好
-  const savedMode = (localStorage.getItem('theme') as 'light' | 'dark' | 'auto') || 'auto'
-  setDarkMode(savedMode)
+  // 加载保存的暗色模式偏好（从 PreferencesStore 读取，已自动从 localStorage 恢复）
+  setDarkMode(preferencesStore.darkModePreference)
 
   // 监听系统主题变化
   const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
   const handlePref = () => {
-    if (darkModePreference.value === 'auto') setDarkMode('auto')
+    if (preferencesStore.darkModePreference === 'auto') setDarkMode('auto')
   }
   mediaQuery.addEventListener('change', handlePref)
 
   // 版本检查（独立于认证，静默执行）
   checkVersion()
 
-  // 检查是否有保存的密钥
-  const savedKey = localStorage.getItem('proxyAccessKey')
-
-  if (savedKey) {
+  // 检查 AuthStore 中是否有保存的密钥
+  if (authStore.apiKey) {
     // 有保存的密钥，开始自动认证
-    isAutoAuthenticating.value = true
-    isInitialized.value = false
+    authStore.setAutoAuthenticating(true)
+    authStore.setInitialized(false)
   } else {
     // 没有保存的密钥，直接显示登录对话框
-    isAutoAuthenticating.value = false
-    isInitialized.value = true
+    authStore.setAutoAuthenticating(false)
+    authStore.setInitialized(true)
   }
 
   // 尝试自动认证
@@ -1137,93 +894,26 @@ onMounted(async () => {
     await loadFuzzyModeStatus()
     // 启动自动刷新
     startAutoRefresh()
-    // 初始化成功，设置系统状态为运行中
-    systemStatus.value = 'running'
+    // 初始化完成后根据最新刷新结果设置系统状态
+    systemStore.setSystemStatus(channelStore.lastRefreshSuccess ? 'running' : 'error')
   }
 })
 
 // 启动自动刷新定时器
 const startAutoRefresh = () => {
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer)
-  }
-  autoRefreshTimer = setInterval(async () => {
-    if (isAuthenticated.value) {
-      try {
-        // 使用合并的 dashboard 接口，减少网络请求
-        const dashboard = await api.getChannelDashboard(activeTab.value)
-
-        // 更新渠道数据，保留当前选中状态和本地延迟测试结果
-        if (activeTab.value === 'messages') {
-          channelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, channelsData.value.channels),
-            current: channelsData.value.current, // 保留当前选中状态
-            loadBalance: dashboard.loadBalance
-          }
-        } else if (activeTab.value === 'responses') {
-          responsesChannelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, responsesChannelsData.value.channels),
-            current: responsesChannelsData.value.current, // 保留当前选中状态
-            loadBalance: dashboard.loadBalance
-          }
-        } else {
-          geminiChannelsData.value = {
-            channels: mergeChannelsWithLocalData(dashboard.channels, geminiChannelsData.value.channels),
-            current: geminiChannelsData.value.current, // 保留当前选中状态
-            loadBalance: dashboard.loadBalance
-          }
-        }
-
-        // 更新 metrics 和 stats
-        dashboardMetrics.value = dashboard.metrics
-        dashboardStats.value = dashboard.stats
-
-        // 请求成功，更新系统状态为运行中
-        systemStatus.value = 'running'
-      } catch (error) {
-        // 请求失败，更新系统状态为错误
-        systemStatus.value = 'error'
-        console.warn('自动刷新失败:', error)
-      }
-    }
-  }, AUTO_REFRESH_INTERVAL)
+  channelStore.startAutoRefresh()
 }
 
 // 停止自动刷新定时器
 const stopAutoRefresh = () => {
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
+  channelStore.stopAutoRefresh()
 }
 
 // 监听 Tab 切换，刷新对应数据
-watch(activeTab, async () => {
+watch(() => channelStore.activeTab, async () => {
   if (isAuthenticated.value) {
-    // 使用 dashboard 接口刷新所有数据
     try {
-      const dashboard = await api.getChannelDashboard(activeTab.value)
-      if (activeTab.value === 'messages') {
-        channelsData.value = {
-          channels: mergeChannelsWithLocalData(dashboard.channels, channelsData.value.channels),
-          current: channelsData.value.current, // 保留当前选中状态
-          loadBalance: dashboard.loadBalance
-        }
-      } else if (activeTab.value === 'responses') {
-        responsesChannelsData.value = {
-          channels: mergeChannelsWithLocalData(dashboard.channels, responsesChannelsData.value.channels),
-          current: responsesChannelsData.value.current, // 保留当前选中状态
-          loadBalance: dashboard.loadBalance
-        }
-      } else {
-        geminiChannelsData.value = {
-          channels: mergeChannelsWithLocalData(dashboard.channels, geminiChannelsData.value.channels),
-          current: geminiChannelsData.value.current, // 保留当前选中状态
-          loadBalance: dashboard.loadBalance
-        }
-      }
-      dashboardMetrics.value = dashboard.metrics
-      dashboardStats.value = dashboard.stats
+      await channelStore.refreshChannels()
     } catch (error) {
       console.error('切换 Tab 刷新失败:', error)
     }
@@ -1239,13 +929,17 @@ watch(isAuthenticated, newValue => {
   }
 })
 
+// 监听自动刷新状态，更新 systemStatus
+watch(() => channelStore.lastRefreshSuccess, (success) => {
+  if (isAuthenticated.value) {
+    systemStore.setSystemStatus(success ? 'running' : 'error')
+  }
+})
+
 // 在组件卸载时清除定时器
 onUnmounted(() => {
   window.removeEventListener('popstate', syncPathFromLocation)
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
+  channelStore.stopAutoRefresh()
 })
 </script>
 
@@ -1326,6 +1020,12 @@ onUnmounted(() => {
   transition: all 0.1s ease;
   padding: 4px 8px;
   position: relative;
+  text-decoration: none;
+  color: inherit;
+}
+
+a.api-type-text {
+  display: inline-block;
 }
 
 .api-type-text:not(.separator):hover {

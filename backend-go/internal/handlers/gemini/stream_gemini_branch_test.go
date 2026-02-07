@@ -33,4 +33,3 @@ func TestStreamGeminiToGemini_ForwardsNonDataLinesAndInvalidJSON(t *testing.T) {
 		t.Fatalf("expected forwarded event line, got=%s", rec.Body.String())
 	}
 }
-

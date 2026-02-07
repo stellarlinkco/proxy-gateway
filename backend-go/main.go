@@ -163,7 +163,8 @@ func main() {
 	}
 
 	// billingHandler 始终创建（用于成本计算），但 client/usageStore 可能为 nil
-	billingHandler := billing.NewHandler(billingClient, pricingService, usageStore, envCfg.PreAuthAmountCents)
+	// TODO: 重新集成计费功能到 handlers
+	_ = billing.NewHandler(billingClient, pricingService, usageStore, envCfg.PreAuthAmountCents)
 	if envCfg.IsBillingEnabled() {
 		log.Printf("[Billing-Init] 计费处理器已初始化 (预授权: %d cents)", envCfg.PreAuthAmountCents)
 	}
@@ -204,7 +205,7 @@ func main() {
 		apiGroup.GET("/messages/channels", messages.GetUpstreams(cfgManager))
 		apiGroup.POST("/messages/channels", messages.AddUpstream(cfgManager))
 		apiGroup.PUT("/messages/channels/:id", messages.UpdateUpstream(cfgManager, channelScheduler))
-		apiGroup.DELETE("/messages/channels/:id", messages.DeleteUpstream(cfgManager))
+		apiGroup.DELETE("/messages/channels/:id", messages.DeleteUpstream(cfgManager, channelScheduler))
 		apiGroup.POST("/messages/channels/:id/keys", messages.AddApiKey(cfgManager))
 		apiGroup.DELETE("/messages/channels/:id/keys/:apiKey", messages.DeleteApiKey(cfgManager))
 		apiGroup.POST("/messages/channels/:id/keys/:apiKey/top", messages.MoveApiKeyToTop(cfgManager))
@@ -231,7 +232,7 @@ func main() {
 		apiGroup.GET("/responses/channels", responses.GetUpstreams(cfgManager))
 		apiGroup.POST("/responses/channels", responses.AddUpstream(cfgManager))
 		apiGroup.PUT("/responses/channels/:id", responses.UpdateUpstream(cfgManager, channelScheduler))
-		apiGroup.DELETE("/responses/channels/:id", responses.DeleteUpstream(cfgManager))
+		apiGroup.DELETE("/responses/channels/:id", responses.DeleteUpstream(cfgManager, channelScheduler))
 		apiGroup.POST("/responses/channels/:id/keys", responses.AddApiKey(cfgManager))
 		apiGroup.DELETE("/responses/channels/:id/keys/:apiKey", responses.DeleteApiKey(cfgManager))
 		apiGroup.POST("/responses/channels/:id/keys/:apiKey/top", responses.MoveApiKeyToTop(cfgManager))
@@ -251,7 +252,7 @@ func main() {
 		apiGroup.GET("/gemini/channels", gemini.GetUpstreams(cfgManager))
 		apiGroup.POST("/gemini/channels", gemini.AddUpstream(cfgManager))
 		apiGroup.PUT("/gemini/channels/:id", gemini.UpdateUpstream(cfgManager, channelScheduler))
-		apiGroup.DELETE("/gemini/channels/:id", gemini.DeleteUpstream(cfgManager))
+		apiGroup.DELETE("/gemini/channels/:id", gemini.DeleteUpstream(cfgManager, channelScheduler))
 		apiGroup.POST("/gemini/channels/:id/keys", gemini.AddApiKey(cfgManager))
 		apiGroup.DELETE("/gemini/channels/:id/keys/:apiKey", gemini.DeleteApiKey(cfgManager))
 		apiGroup.POST("/gemini/channels/:id/keys/:apiKey/top", gemini.MoveApiKeyToTop(cfgManager))
@@ -262,6 +263,7 @@ func main() {
 		apiGroup.PATCH("/gemini/channels/:id/status", gemini.SetChannelStatus(cfgManager))
 		apiGroup.POST("/gemini/channels/:id/promotion", gemini.SetChannelPromotion(cfgManager))
 		apiGroup.PUT("/gemini/loadbalance", gemini.UpdateLoadBalance(cfgManager))
+		apiGroup.GET("/gemini/channels/dashboard", gemini.GetDashboard(cfgManager, channelScheduler))
 		apiGroup.GET("/gemini/channels/metrics", handlers.GetGeminiChannelMetrics(geminiMetricsManager, cfgManager))
 		apiGroup.GET("/gemini/channels/metrics/history", handlers.GetGeminiChannelMetricsHistory(geminiMetricsManager, cfgManager))
 		apiGroup.GET("/gemini/channels/:id/keys/metrics/history", handlers.GetGeminiChannelKeyMetricsHistory(geminiMetricsManager, cfgManager))
@@ -287,7 +289,7 @@ func main() {
 	}
 
 	// 代理端点 - Messages API
-	messagesHandler := messages.NewHandler(envCfg, cfgManager, channelScheduler, billingClient, billingHandler, liveRequestManager, metricsStore)
+	messagesHandler := messages.Handler(envCfg, cfgManager, channelScheduler)
 	r.POST("/v1/messages", messagesHandler)
 	r.POST("/v1/messages/count_tokens", messages.CountTokensHandler(envCfg, cfgManager, channelScheduler))
 
@@ -296,14 +298,14 @@ func main() {
 	r.GET("/v1/models/:model", messages.ModelsDetailHandler(envCfg, cfgManager, channelScheduler))
 
 	// 代理端点 - Responses API
-	responsesHandler := responses.NewHandler(envCfg, cfgManager, sessionManager, channelScheduler, billingClient, billingHandler, liveRequestManager, metricsStore)
+	responsesHandler := responses.Handler(envCfg, cfgManager, sessionManager, channelScheduler)
 	r.POST("/v1/responses", responsesHandler)
 	r.POST("/v1/responses/compact", responses.CompactHandler(envCfg, cfgManager, sessionManager, channelScheduler))
 
 	// 代理端点 - Gemini API (原生协议)
 	// 使用通配符捕获 model:action 格式，如 gemini-pro:generateContent
 	// 路径格式：/v1beta/models/{model}:generateContent (Gemini 原生格式)
-	geminiHandler := gemini.NewHandler(envCfg, cfgManager, channelScheduler, liveRequestManager, metricsStore)
+	geminiHandler := gemini.Handler(envCfg, cfgManager, channelScheduler)
 	r.POST("/v1beta/models/*modelAction", geminiHandler)
 
 	// 静态文件服务 (嵌入的前端)
@@ -358,8 +360,10 @@ func main() {
 
 	// 创建 HTTP 服务器
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: r,
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// 用于传递关闭结果

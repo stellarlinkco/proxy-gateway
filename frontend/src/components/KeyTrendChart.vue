@@ -19,7 +19,7 @@
           <v-btn value="today" size="x-small">今日</v-btn>
         </v-btn-toggle>
 
-        <v-btn icon size="x-small" variant="text" @click="refreshData" :loading="isLoading" :disabled="isLoading">
+        <v-btn icon size="x-small" variant="text" :loading="isLoading" :disabled="isLoading" @click="refreshData">
           <v-icon size="small">mdi-refresh</v-icon>
         </v-btn>
       </div>
@@ -74,6 +74,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useTheme } from 'vuetify'
 import VueApexCharts from 'vue3-apexcharts'
+import type { ApexOptions } from 'apexcharts'
 import { api, type ChannelKeyMetricsHistoryResponse } from '../services/api'
 
 // Register apexchart component
@@ -307,13 +308,13 @@ const failureAnnotations = computed(() => {
 })
 
 // Computed: get all data points flattened
-const allDataPoints = computed(() => {
+const _allDataPoints = computed(() => {
   if (!historyData.value?.keys) return []
   return historyData.value.keys.flatMap(k => k.dataPoints || [])
 })
 
 // Computed: chart options
-const chartOptions = computed(() => {
+const chartOptions = computed<ApexOptions>(() => {
   const mode = selectedView.value
 
   // Token/Cache 模式使用双 Y 轴（左侧 Input/Read，右侧 Output/Create）
@@ -379,7 +380,7 @@ const chartOptions = computed(() => {
     },
     colors: getChartColors(),
     fill: {
-      type: 'gradient',
+      type: 'gradient' as const,
       gradient: {
         shadeIntensity: 1,
         opacityFrom: 0.4,
@@ -391,7 +392,7 @@ const chartOptions = computed(() => {
       enabled: false
     },
     stroke: {
-      curve: 'smooth',
+      curve: 'smooth' as const,
       width: 2,
       // traffic 模式全用实线；tokens/cache 模式：Input/Read 实线，Output/Write 虚线
       dashArray: getDashArray()
@@ -437,6 +438,8 @@ const buildChartSeries = (data: ChannelKeyMetricsHistoryResponse | null) => {
   const result: { name: string; data: { x: number; y: number }[] }[] = []
 
   data.keys.forEach((keyData, keyIndex) => {
+    const _color = keyColors[keyIndex % keyColors.length]
+
     if (mode === 'traffic') {
       // 单向模式：只显示请求数
       result.push({
@@ -540,7 +543,7 @@ const formatTooltipValue = (val: number, mode: ViewMode): string => {
 }
 
 // Helper: build custom tooltip for traffic mode (shows success/failure breakdown)
-const buildTrafficTooltip = ({ series, seriesIndex, dataPointIndex, w }: any): string => {
+const buildTrafficTooltip = ({ seriesIndex, dataPointIndex, w }: any): string => {
   if (!historyData.value?.keys) return ''
 
   const timestamp = w.globals.seriesX[seriesIndex][dataPointIndex]
@@ -641,7 +644,7 @@ const buildTrafficTooltip = ({ series, seriesIndex, dataPointIndex, w }: any): s
 }
 
 // Helper: get duration in milliseconds
-const getDurationMs = (duration: Duration): number => {
+const _getDurationMs = (duration: Duration): number => {
   switch (duration) {
     case '1h': return 60 * 60 * 1000
     case '6h': return 6 * 60 * 60 * 1000
@@ -728,7 +731,7 @@ const refreshData = async (isAutoRefresh = false) => {
       // Update data in place and use updateSeries for smooth update
       historyData.value = newData
       const newSeries = buildChartSeries(newData)
-      chartRef.value.updateSeries(newSeries, false) // false = no animation reset
+      chartRef.value?.updateSeries(newSeries, false) // false = no animation reset
     } else {
       // Full update (initial load or structure changed)
       historyData.value = newData

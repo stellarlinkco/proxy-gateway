@@ -91,4 +91,3 @@ func TestGetCacheStats_ProtectedAndReturnsMetrics(t *testing.T) {
 		}
 	})
 }
-

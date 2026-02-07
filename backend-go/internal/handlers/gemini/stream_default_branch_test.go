@@ -37,4 +37,3 @@ func TestHandleStreamSuccess_DefaultUpstreamTypeFallsBackToGemini(t *testing.T) 
 		t.Fatalf("expected stream output, got=%s", rec.Body.String())
 	}
 }
-

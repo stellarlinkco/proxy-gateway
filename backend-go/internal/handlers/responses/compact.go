@@ -51,7 +51,7 @@ func CompactHandler(
 		userID := common.ExtractConversationID(c, bodyBytes)
 
 		// 检查是否为多渠道模式
-		isMultiChannel := channelScheduler.IsMultiChannelMode(true)
+		isMultiChannel := channelScheduler.IsMultiChannelMode(scheduler.ChannelKindResponses)
 
 		if isMultiChannel {
 			handleMultiChannelCompact(c, envCfg, cfgManager, channelScheduler, bodyBytes, userID)
@@ -98,7 +98,7 @@ func handleSingleChannelCompact(
 			lastErr = compactErr
 			if compactErr.shouldFailover {
 				failedKeys[apiKey] = true
-				cfgManager.MarkKeyAsFailed(apiKey)
+				cfgManager.MarkKeyAsFailed(apiKey, "Responses")
 				continue
 			}
 			// 非故障转移错误，直接返回
@@ -136,11 +136,11 @@ func handleMultiChannelCompact(
 	userID string,
 ) {
 	failedChannels := make(map[int]bool)
-	maxAttempts := channelScheduler.GetActiveChannelCount(true)
+	maxAttempts := channelScheduler.GetActiveChannelCount(scheduler.ChannelKindResponses)
 	var lastErr *compactError
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		selection, err := channelScheduler.SelectChannel(c.Request.Context(), userID, failedChannels, true)
+		selection, err := channelScheduler.SelectChannel(c.Request.Context(), userID, failedChannels, scheduler.ChannelKindResponses)
 		if err != nil {
 			break
 		}
@@ -154,9 +154,10 @@ func handleMultiChannelCompact(
 		if success {
 			// compact 不产生 usage，但仍需记录成功以更新熔断器/权重
 			if successKey != "" {
-				channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, successKey, nil, false, "", 0)
+				channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, successKey, nil, scheduler.ChannelKindResponses)
+				// 只有真正成功的请求才设置 Trace 亲和
+				channelScheduler.SetTraceAffinity(userID, channelIndex)
 			}
-			channelScheduler.SetTraceAffinity(userID, channelIndex)
 			return
 		}
 
@@ -231,8 +232,8 @@ func tryCompactChannelWithAllKeys(
 			lastErr = compactErr
 			if compactErr.shouldFailover {
 				failedKeys[apiKey] = true
-				cfgManager.MarkKeyAsFailed(apiKey)
-				channelScheduler.RecordFailure(upstream.BaseURL, apiKey, true)
+				cfgManager.MarkKeyAsFailed(apiKey, "Responses")
+				channelScheduler.RecordFailure(upstream.BaseURL, apiKey, scheduler.ChannelKindResponses)
 				continue
 			}
 			// 非故障转移错误，返回但标记渠道成功（请求已处理）
@@ -265,7 +266,7 @@ func tryCompactWithKey(
 	utils.SetAuthenticationHeader(req.Header, apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := common.SendRequest(req, upstream, envCfg, false)
+	resp, err := common.SendRequest(req, upstream, envCfg, false, "Responses")
 	if err != nil {
 		return false, &compactError{status: 502, body: []byte(`{"error":"上游请求失败"}`), shouldFailover: true}
 	}
@@ -276,7 +277,7 @@ func tryCompactWithKey(
 
 	// 判断是否需要故障转移
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		shouldFailover, _ := common.ShouldRetryWithNextKey(resp.StatusCode, respBody, cfgManager.GetFuzzyModeEnabled())
+		shouldFailover, _ := common.ShouldRetryWithNextKey(resp.StatusCode, respBody, cfgManager.GetFuzzyModeEnabled(), "Responses")
 		return false, &compactError{status: resp.StatusCode, body: respBody, shouldFailover: shouldFailover}
 	}
 

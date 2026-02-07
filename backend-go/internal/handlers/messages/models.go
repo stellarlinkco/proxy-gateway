@@ -171,7 +171,7 @@ func fetchModelsFromChannels(c *gin.Context, cfgManager *config.ConfigManager, c
 		if isResponses {
 			channelType = "Responses"
 		}
-		log.Printf("[Models] 解析 %s 渠道响应失败: %v", channelType, err)
+		log.Printf("[%s-Models] 解析渠道响应失败: %v", channelType, err)
 		return nil
 	}
 
@@ -213,10 +213,15 @@ func tryModelsRequest(c *gin.Context, cfgManager *config.ConfigManager, channelS
 	}
 
 	for attempt := 0; attempt < maxChannelRetries; attempt++ {
+		kind := scheduler.ChannelKindMessages
+		if isResponses {
+			kind = scheduler.ChannelKindResponses
+		}
+
 		// 使用调度器选择渠道
-		selection, err := channelScheduler.SelectChannel(c.Request.Context(), "", failedChannels, isResponses)
+		selection, err := channelScheduler.SelectChannel(c.Request.Context(), "", failedChannels, kind)
 		if err != nil {
-			log.Printf("[Models] %s 渠道无可用: %v", channelType, err)
+			log.Printf("[%s-Models] 渠道无可用: %v", channelType, err)
 			break
 		}
 
@@ -232,16 +237,16 @@ func tryModelsRequest(c *gin.Context, cfgManager *config.ConfigManager, channelS
 		client := httpclient.GetManager().GetStandardClient(modelsRequestTimeout, upstream.InsecureSkipVerify)
 
 		// 获取第一个可用的 key
-		apiKey, err := cfgManager.GetNextAPIKey(upstream, nil)
+		apiKey, err := cfgManager.GetNextAPIKey(upstream, nil, channelType)
 		if err != nil {
-			log.Printf("[Models] %s 获取 API Key 失败: channel=%s, error=%v", channelType, upstream.Name, err)
+			log.Printf("[%s-Models] 获取 API Key 失败: channel=%s, error=%v", channelType, upstream.Name, err)
 			failedChannels[selection.ChannelIndex] = true
 			continue
 		}
 
 		req, err := http.NewRequestWithContext(c.Request.Context(), method, url, nil)
 		if err != nil {
-			log.Printf("[Models] %s 创建请求失败: channel=%s, url=%s, error=%v", channelType, upstream.Name, url, err)
+			log.Printf("[%s-Models] 创建请求失败: channel=%s, url=%s, error=%v", channelType, upstream.Name, url, err)
 			failedChannels[selection.ChannelIndex] = true
 			continue
 		}
@@ -250,7 +255,7 @@ func tryModelsRequest(c *gin.Context, cfgManager *config.ConfigManager, channelS
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[Models] %s 请求失败: channel=%s, key=%s, url=%s, error=%v",
+			log.Printf("[%s-Models] 请求失败: channel=%s, key=%s, url=%s, error=%v",
 				channelType, upstream.Name, utils.MaskAPIKey(apiKey), url, err)
 			failedChannels[selection.ChannelIndex] = true
 			continue
@@ -260,22 +265,22 @@ func tryModelsRequest(c *gin.Context, cfgManager *config.ConfigManager, channelS
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if err != nil {
-				log.Printf("[Models] %s 读取响应失败: channel=%s, error=%v", channelType, upstream.Name, err)
+				log.Printf("[%s-Models] 读取响应失败: channel=%s, error=%v", channelType, upstream.Name, err)
 				failedChannels[selection.ChannelIndex] = true
 				continue
 			}
-			log.Printf("[Models] %s 请求成功: method=%s, channel=%s, key=%s, url=%s, reason=%s",
+			log.Printf("[%s-Models] 请求成功: method=%s, channel=%s, key=%s, url=%s, reason=%s",
 				channelType, method, upstream.Name, utils.MaskAPIKey(apiKey), url, selection.Reason)
 			return body, true
 		}
 
-		log.Printf("[Models] %s 上游返回非 200: channel=%s, key=%s, status=%d, url=%s",
+		log.Printf("[%s-Models] 上游返回非 200: channel=%s, key=%s, status=%d, url=%s",
 			channelType, upstream.Name, utils.MaskAPIKey(apiKey), resp.StatusCode, url)
 		resp.Body.Close()
 		failedChannels[selection.ChannelIndex] = true
 	}
 
-	log.Printf("[Models] %s 所有渠道均失败: method=%s, suffix=%s", channelType, method, suffix)
+	log.Printf("[%s-Models] 所有渠道均失败: method=%s, suffix=%s", channelType, method, suffix)
 	return nil, false
 }
 

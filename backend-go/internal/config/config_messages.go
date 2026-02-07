@@ -93,6 +93,41 @@ func (cm *ConfigManager) UpdateUpstream(index int, updates UpstreamUpdate) (shou
 		upstream.Website = *updates.Website
 	}
 	if updates.APIKeys != nil {
+		// 记录被移除的 Key 到历史列表（用于统计聚合）
+		newKeys := make(map[string]bool)
+		for _, key := range updates.APIKeys {
+			newKeys[key] = true
+		}
+
+		// 找出被移除的 Key（在旧列表中但不在新列表中）
+		for _, key := range upstream.APIKeys {
+			if !newKeys[key] {
+				// 检查是否已在历史列表中
+				alreadyInHistory := false
+				for _, hk := range upstream.HistoricalAPIKeys {
+					if hk == key {
+						alreadyInHistory = true
+						break
+					}
+				}
+				if !alreadyInHistory {
+					upstream.HistoricalAPIKeys = append(upstream.HistoricalAPIKeys, key)
+					log.Printf("[Config-Upstream] 渠道 [%d] %s: Key %s 已移入历史列表", index, upstream.Name, utils.MaskAPIKey(key))
+				}
+			}
+		}
+
+		// 如果新 Key 在历史列表中，从历史列表移除（换回来了）
+		var newHistoricalKeys []string
+		for _, hk := range upstream.HistoricalAPIKeys {
+			if !newKeys[hk] {
+				newHistoricalKeys = append(newHistoricalKeys, hk)
+			} else {
+				log.Printf("[Config-Upstream] 渠道 [%d] %s: Key %s 已从历史列表恢复", index, upstream.Name, utils.MaskAPIKey(hk))
+			}
+		}
+		upstream.HistoricalAPIKeys = newHistoricalKeys
+
 		// 只有单 key 场景且 key 被更换时，才自动激活并重置熔断
 		if len(upstream.APIKeys) == 1 && len(updates.APIKeys) == 1 &&
 			upstream.APIKeys[0] != updates.APIKeys[0] {
@@ -125,6 +160,9 @@ func (cm *ConfigManager) UpdateUpstream(index int, updates UpstreamUpdate) (shou
 	if updates.LowQuality != nil {
 		upstream.LowQuality = *updates.LowQuality
 	}
+	if updates.InjectDummyThoughtSignature != nil {
+		upstream.InjectDummyThoughtSignature = *updates.InjectDummyThoughtSignature
+	}
 
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return false, err
@@ -147,7 +185,7 @@ func (cm *ConfigManager) RemoveUpstream(index int) (*UpstreamConfig, error) {
 	cm.config.Upstream = append(cm.config.Upstream[:index], cm.config.Upstream[index+1:]...)
 
 	// 清理被删除渠道的失败 key 冷却记录
-	cm.clearFailedKeysForUpstream(&removed)
+	cm.clearFailedKeysForUpstream(&removed, "Messages")
 
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return nil, err
@@ -175,11 +213,22 @@ func (cm *ConfigManager) AddAPIKey(index int, apiKey string) error {
 
 	cm.config.Upstream[index].APIKeys = append(cm.config.Upstream[index].APIKeys, apiKey)
 
+	// 如果该 Key 在历史列表中，从历史列表移除（换回来了）
+	var newHistoricalKeys []string
+	for _, hk := range cm.config.Upstream[index].HistoricalAPIKeys {
+		if hk != apiKey {
+			newHistoricalKeys = append(newHistoricalKeys, hk)
+		} else {
+			log.Printf("[Messages-Key] 上游 [%d] %s: Key %s 已从历史列表恢复", index, cm.config.Upstream[index].Name, utils.MaskAPIKey(hk))
+		}
+	}
+	cm.config.Upstream[index].HistoricalAPIKeys = newHistoricalKeys
+
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return err
 	}
 
-	log.Printf("[Config-Key] 已添加API密钥到上游 [%d] %s", index, cm.config.Upstream[index].Name)
+	log.Printf("[Messages-Key] 已添加API密钥到上游 [%d] %s", index, cm.config.Upstream[index].Name)
 	return nil
 }
 
@@ -207,11 +256,24 @@ func (cm *ConfigManager) RemoveAPIKey(index int, apiKey string) error {
 		return fmt.Errorf("API密钥不存在")
 	}
 
+	// 将被移除的 Key 添加到历史列表（用于统计聚合）
+	alreadyInHistory := false
+	for _, hk := range cm.config.Upstream[index].HistoricalAPIKeys {
+		if hk == apiKey {
+			alreadyInHistory = true
+			break
+		}
+	}
+	if !alreadyInHistory {
+		cm.config.Upstream[index].HistoricalAPIKeys = append(cm.config.Upstream[index].HistoricalAPIKeys, apiKey)
+		log.Printf("[Messages-Key] 上游 [%d] %s: Key %s 已移入历史列表", index, cm.config.Upstream[index].Name, utils.MaskAPIKey(apiKey))
+	}
+
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return err
 	}
 
-	log.Printf("[Config-Key] 已从上游 [%d] %s 删除API密钥", index, cm.config.Upstream[index].Name)
+	log.Printf("[Messages-Key] 已从上游 [%d] %s 删除API密钥", index, cm.config.Upstream[index].Name)
 	return nil
 }
 
@@ -417,7 +479,7 @@ func (cm *ConfigManager) DeprioritizeAPIKey(apiKey string) error {
 			// 移动到末尾
 			upstream.APIKeys = append(upstream.APIKeys[:index], upstream.APIKeys[index+1:]...)
 			upstream.APIKeys = append(upstream.APIKeys, apiKey)
-			log.Printf("[Config-Key] 已将API密钥移动到末尾以降低优先级: %s (渠道: %s)", utils.MaskAPIKey(apiKey), upstream.Name)
+			log.Printf("[Messages-Key] 已将API密钥移动到末尾以降低优先级: %s (渠道: %s)", utils.MaskAPIKey(apiKey), upstream.Name)
 			return cm.saveConfigLocked(cm.config)
 		}
 	}
@@ -437,7 +499,7 @@ func (cm *ConfigManager) DeprioritizeAPIKey(apiKey string) error {
 			// 移动到末尾
 			upstream.APIKeys = append(upstream.APIKeys[:index], upstream.APIKeys[index+1:]...)
 			upstream.APIKeys = append(upstream.APIKeys, apiKey)
-			log.Printf("[Config-Key] 已将API密钥移动到末尾以降低优先级: %s (Responses渠道: %s)", utils.MaskAPIKey(apiKey), upstream.Name)
+			log.Printf("[Responses-Key] 已将API密钥移动到末尾以降低优先级: %s (Responses渠道: %s)", utils.MaskAPIKey(apiKey), upstream.Name)
 			return cm.saveConfigLocked(cm.config)
 		}
 	}

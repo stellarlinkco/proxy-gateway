@@ -5,6 +5,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/BenedictKing/claude-proxy/internal/utils"
 )
 
 // ============== Gemini 渠道方法 ==============
@@ -91,6 +93,41 @@ func (cm *ConfigManager) UpdateGeminiUpstream(index int, updates UpstreamUpdate)
 		upstream.Website = *updates.Website
 	}
 	if updates.APIKeys != nil {
+		// 记录被移除的 Key 到历史列表（用于统计聚合）
+		newKeys := make(map[string]bool)
+		for _, key := range updates.APIKeys {
+			newKeys[key] = true
+		}
+
+		// 找出被移除的 Key（在旧列表中但不在新列表中）
+		for _, key := range upstream.APIKeys {
+			if !newKeys[key] {
+				// 检查是否已在历史列表中
+				alreadyInHistory := false
+				for _, hk := range upstream.HistoricalAPIKeys {
+					if hk == key {
+						alreadyInHistory = true
+						break
+					}
+				}
+				if !alreadyInHistory {
+					upstream.HistoricalAPIKeys = append(upstream.HistoricalAPIKeys, key)
+					log.Printf("[Config-Upstream] Gemini 渠道 [%d] %s: Key %s 已移入历史列表", index, upstream.Name, utils.MaskAPIKey(key))
+				}
+			}
+		}
+
+		// 如果新 Key 在历史列表中，从历史列表移除（换回来了）
+		var newHistoricalKeys []string
+		for _, hk := range upstream.HistoricalAPIKeys {
+			if !newKeys[hk] {
+				newHistoricalKeys = append(newHistoricalKeys, hk)
+			} else {
+				log.Printf("[Config-Upstream] Gemini 渠道 [%d] %s: Key %s 已从历史列表恢复", index, upstream.Name, utils.MaskAPIKey(hk))
+			}
+		}
+		upstream.HistoricalAPIKeys = newHistoricalKeys
+
 		// 只有单 key 场景且 key 被更换时，才自动激活并重置熔断
 		if len(upstream.APIKeys) == 1 && len(updates.APIKeys) == 1 &&
 			upstream.APIKeys[0] != updates.APIKeys[0] {
@@ -123,6 +160,12 @@ func (cm *ConfigManager) UpdateGeminiUpstream(index int, updates UpstreamUpdate)
 	if updates.LowQuality != nil {
 		upstream.LowQuality = *updates.LowQuality
 	}
+	if updates.InjectDummyThoughtSignature != nil {
+		upstream.InjectDummyThoughtSignature = *updates.InjectDummyThoughtSignature
+	}
+	if updates.StripThoughtSignature != nil {
+		upstream.StripThoughtSignature = *updates.StripThoughtSignature
+	}
 
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return false, err
@@ -145,7 +188,7 @@ func (cm *ConfigManager) RemoveGeminiUpstream(index int) (*UpstreamConfig, error
 	cm.config.GeminiUpstream = append(cm.config.GeminiUpstream[:index], cm.config.GeminiUpstream[index+1:]...)
 
 	// 清理被删除渠道的失败 key 冷却记录
-	cm.clearFailedKeysForUpstream(&removed)
+	cm.clearFailedKeysForUpstream(&removed, "Gemini")
 
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return nil, err
@@ -173,11 +216,22 @@ func (cm *ConfigManager) AddGeminiAPIKey(index int, apiKey string) error {
 
 	cm.config.GeminiUpstream[index].APIKeys = append(cm.config.GeminiUpstream[index].APIKeys, apiKey)
 
+	// 如果该 Key 在历史列表中，从历史列表移除（换回来了）
+	var newHistoricalKeys []string
+	for _, hk := range cm.config.GeminiUpstream[index].HistoricalAPIKeys {
+		if hk != apiKey {
+			newHistoricalKeys = append(newHistoricalKeys, hk)
+		} else {
+			log.Printf("[Gemini-Key] 上游 [%d] %s: Key %s 已从历史列表恢复", index, cm.config.GeminiUpstream[index].Name, utils.MaskAPIKey(hk))
+		}
+	}
+	cm.config.GeminiUpstream[index].HistoricalAPIKeys = newHistoricalKeys
+
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return err
 	}
 
-	log.Printf("[Config-Key] 已添加API密钥到 Gemini 上游 [%d] %s", index, cm.config.GeminiUpstream[index].Name)
+	log.Printf("[Gemini-Key] 已添加API密钥到 Gemini 上游 [%d] %s", index, cm.config.GeminiUpstream[index].Name)
 	return nil
 }
 
@@ -205,17 +259,30 @@ func (cm *ConfigManager) RemoveGeminiAPIKey(index int, apiKey string) error {
 		return fmt.Errorf("API密钥不存在")
 	}
 
+	// 将被移除的 Key 添加到历史列表（用于统计聚合）
+	alreadyInHistory := false
+	for _, hk := range cm.config.GeminiUpstream[index].HistoricalAPIKeys {
+		if hk == apiKey {
+			alreadyInHistory = true
+			break
+		}
+	}
+	if !alreadyInHistory {
+		cm.config.GeminiUpstream[index].HistoricalAPIKeys = append(cm.config.GeminiUpstream[index].HistoricalAPIKeys, apiKey)
+		log.Printf("[Gemini-Key] 上游 [%d] %s: Key %s 已移入历史列表", index, cm.config.GeminiUpstream[index].Name, utils.MaskAPIKey(apiKey))
+	}
+
 	if err := cm.saveConfigLocked(cm.config); err != nil {
 		return err
 	}
 
-	log.Printf("[Config-Key] 已从 Gemini 上游 [%d] %s 删除API密钥", index, cm.config.GeminiUpstream[index].Name)
+	log.Printf("[Gemini-Key] 已从 Gemini 上游 [%d] %s 删除API密钥", index, cm.config.GeminiUpstream[index].Name)
 	return nil
 }
 
 // GetNextGeminiAPIKey 获取下一个 Gemini API 密钥（Key 轮询）
 func (cm *ConfigManager) GetNextGeminiAPIKey(upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
-	return cm.getNextAPIKeyRoundRobin("gemini", upstream, failedKeys)
+	return cm.GetNextAPIKey(upstream, failedKeys, "Gemini")
 }
 
 // MoveGeminiAPIKeyToTop 将指定 Gemini 渠道的 API 密钥移到最前面

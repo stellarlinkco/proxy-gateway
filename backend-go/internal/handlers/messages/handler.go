@@ -3,267 +3,66 @@ package messages
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
-	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
-	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
-	"github.com/BenedictKing/claude-proxy/internal/monitor"
 	"github.com/BenedictKing/claude-proxy/internal/providers"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/types"
 	"github.com/BenedictKing/claude-proxy/internal/utils"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
-type requestLogContext struct {
-	requestID string
-	startTime time.Time
-	apiType   string
-
-	model       string
-	isStreaming bool
-
-	channelIndex int
-	channelName  string
-	apiKey       string
-
-	usage     *types.Usage
-	costCents int64
-
-	success  bool
-	errorMsg string
-
-	liveRequestManager *monitor.LiveRequestManager
-}
-
-func (r *requestLogContext) updateLive() {
-	if r == nil || r.liveRequestManager == nil {
-		return
-	}
-	r.liveRequestManager.StartRequest(&monitor.LiveRequest{
-		RequestID:    r.requestID,
-		ChannelIndex: r.channelIndex,
-		ChannelName:  r.channelName,
-		KeyMask:      utils.MaskAPIKey(r.apiKey),
-		Model:        r.model,
-		StartTime:    r.startTime,
-		APIType:      r.apiType,
-		IsStreaming:  r.isStreaming,
-	})
-}
-
-func truncateErrorMessage(msg string) string {
-	const maxLen = 1024
-	if len(msg) <= maxLen {
-		return msg
-	}
-	return msg[:maxLen] + "..."
-}
-
-type ClientError struct {
-	Err error
-}
-
-func (e *ClientError) Error() string {
-	if e == nil || e.Err == nil {
-		return "client error"
-	}
-	return e.Err.Error()
-}
-
-func (e *ClientError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.Err
-}
-
-func asClientError(err error) *ClientError {
-	if err == nil {
-		return nil
-	}
-
-	var syntaxErr *json.SyntaxError
-	var unmarshalTypeErr *json.UnmarshalTypeError
-	if errors.As(err, &syntaxErr) || errors.As(err, &unmarshalTypeErr) {
-		return &ClientError{Err: err}
-	}
-	return nil
-}
-
-type Handler struct {
-	envCfg           *config.EnvConfig
-	cfgManager       *config.ConfigManager
-	channelScheduler *scheduler.ChannelScheduler
-	billingClient    *billing.Client
-	billingHandler   *billing.Handler
-
-	liveRequestManager *monitor.LiveRequestManager
-	sqliteStore        *metrics.SQLiteStore
-}
-
-func NewHandler(
-	envCfg *config.EnvConfig,
-	cfgManager *config.ConfigManager,
-	channelScheduler *scheduler.ChannelScheduler,
-	billingClient *billing.Client,
-	billingHandler *billing.Handler,
-	liveRequestManager *monitor.LiveRequestManager,
-	sqliteStore *metrics.SQLiteStore,
-) gin.HandlerFunc {
-	h := &Handler{
-		envCfg:             envCfg,
-		cfgManager:         cfgManager,
-		channelScheduler:   channelScheduler,
-		billingClient:      billingClient,
-		billingHandler:     billingHandler,
-		liveRequestManager: liveRequestManager,
-		sqliteStore:        sqliteStore,
-	}
-	return h.Handle
-}
-
-// Handle Messages API 代理处理器
+// Handler Messages API 代理处理器
 // 支持多渠道调度：当配置多个渠道时自动启用
-func (h *Handler) Handle(c *gin.Context) {
-	envCfg := h.envCfg
-	cfgManager := h.cfgManager
-	channelScheduler := h.channelScheduler
-	billingClient := h.billingClient
-	billingHandler := h.billingHandler
-
-	// 认证：计费模式使用 BillingAuthMiddleware，否则使用 ProxyAuthMiddleware
-	if envCfg.IsBillingEnabled() && billingClient != nil {
-		middleware.BillingAuthMiddleware(envCfg, billingClient)(c)
-	} else {
+func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channelScheduler *scheduler.ChannelScheduler) gin.HandlerFunc {
+	return gin.HandlerFunc(func(c *gin.Context) {
+		// 先进行认证
 		middleware.ProxyAuthMiddleware(envCfg)(c)
-	}
-	if c.IsAborted() {
-		return
-	}
-
-	startTime := time.Now()
-	requestID := uuid.New().String()
-
-	reqCtx := &requestLogContext{
-		requestID:          requestID,
-		startTime:          startTime,
-		apiType:            "messages",
-		liveRequestManager: h.liveRequestManager,
-	}
-
-	if h.liveRequestManager != nil {
-		reqCtx.updateLive()
-		defer h.liveRequestManager.EndRequest(requestID)
-	}
-
-	defer func() {
-		if h.sqliteStore == nil {
+		if c.IsAborted() {
 			return
 		}
 
-		statusCode := c.Writer.Status()
-		success := reqCtx.success
-		if !success && statusCode >= 200 && statusCode < 300 && reqCtx.errorMsg == "" {
-			success = true
-		}
+		startTime := time.Now()
 
-		var usage types.Usage
-		if reqCtx.usage != nil {
-			usage = *reqCtx.usage
-		}
-
-		errorMsg := reqCtx.errorMsg
-		if !success && errorMsg == "" && statusCode >= 400 {
-			errorMsg = fmt.Sprintf("http status %d", statusCode)
-		}
-
-		if err := h.sqliteStore.AddRequestLog(metrics.RequestLogRecord{
-			RequestID:           requestID,
-			ChannelIndex:        reqCtx.channelIndex,
-			ChannelName:         reqCtx.channelName,
-			KeyMask:             utils.MaskAPIKey(reqCtx.apiKey),
-			Timestamp:           startTime,
-			DurationMs:          time.Since(startTime).Milliseconds(),
-			StatusCode:          statusCode,
-			Success:             success,
-			Model:               reqCtx.model,
-			InputTokens:         int64(usage.InputTokens),
-			OutputTokens:        int64(usage.OutputTokens),
-			CacheCreationTokens: int64(usage.CacheCreationInputTokens),
-			CacheReadTokens:     int64(usage.CacheReadInputTokens),
-			CostCents:           reqCtx.costCents,
-			ErrorMessage:        truncateErrorMessage(errorMsg),
-			APIType:             "messages",
-		}); err != nil {
-			log.Printf("[Messages-RequestLog] 警告: AddRequestLog 失败: %v", err)
-		}
-	}()
-
-	// 计费预授权
-	var billingCtx *billing.RequestContext
-	if billingHandler != nil {
-		var err error
-		billingCtx, err = billingHandler.BeforeRequest(c)
+		// 读取请求体
+		bodyBytes, err := common.ReadRequestBody(c, envCfg.MaxRequestBodySize)
 		if err != nil {
-			reqCtx.success = false
-			reqCtx.errorMsg = truncateErrorMessage(err.Error())
-			if err == billing.ErrInsufficientBalance {
-				c.JSON(402, gin.H{"error": "insufficient_balance", "message": "余额不足"})
-			} else {
-				log.Printf("[Billing-Error] 预授权失败: %v", err)
-				c.JSON(500, gin.H{"error": "billing_error", "message": "计费服务暂时不可用"})
-			}
 			return
 		}
-	}
-	// 确保异常时释放预授权
-	defer func() {
-		if billingCtx != nil && !billingCtx.Charged {
-			billingHandler.Release(billingCtx)
+
+		// 预处理：移除空 signature 字段，预防 400 错误
+		// modified 表示请求体是否被修改，详细日志由 RemoveEmptySignatures 内部记录
+		bodyBytes, modified := common.RemoveEmptySignatures(bodyBytes, envCfg.EnableRequestLogs, "Messages")
+		_ = modified // 保留以便未来扩展（如需在 handler 层面做额外处理）
+
+		// 解析请求
+		var claudeReq types.ClaudeRequest
+		if len(bodyBytes) > 0 {
+			_ = json.Unmarshal(bodyBytes, &claudeReq)
 		}
-	}()
 
-	// 读取请求体
-	bodyBytes, err := common.ReadRequestBody(c, envCfg.MaxRequestBodySize)
-	if err != nil {
-		reqCtx.success = false
-		reqCtx.errorMsg = truncateErrorMessage(err.Error())
-		return
-	}
+		// 提取 user_id 用于 Trace 亲和性
+		userID := common.ExtractUserID(bodyBytes)
 
-	// 解析请求
-	var claudeReq types.ClaudeRequest
-	if len(bodyBytes) > 0 {
-		_ = json.Unmarshal(bodyBytes, &claudeReq)
-	}
-	reqCtx.model = claudeReq.Model
-	reqCtx.isStreaming = claudeReq.Stream
-	reqCtx.updateLive()
+		// 记录原始请求信息（仅在入口处记录一次）
+		common.LogOriginalRequest(c, bodyBytes, envCfg, "Messages")
 
-	// 提取 user_id 用于 Trace 亲和性
-	userID := common.ExtractUserID(bodyBytes)
+		// 检查是否为多渠道模式
+		isMultiChannel := channelScheduler.IsMultiChannelMode(scheduler.ChannelKindMessages)
 
-	// 记录原始请求信息（仅在入口处记录一次）
-	common.LogOriginalRequest(c, bodyBytes, envCfg, "Messages")
-
-	// 检查是否为多渠道模式
-	isMultiChannel := channelScheduler.IsMultiChannelMode(false)
-
-	if isMultiChannel {
-		handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, userID, startTime, billingHandler, billingCtx, reqCtx)
-	} else {
-		handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, startTime, billingHandler, billingCtx, reqCtx)
-	}
+		if isMultiChannel {
+			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, userID, startTime)
+		} else {
+			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, startTime)
+		}
+	})
 }
 
 // handleMultiChannel 处理多渠道代理请求
@@ -276,259 +75,84 @@ func handleMultiChannel(
 	claudeReq types.ClaudeRequest,
 	userID string,
 	startTime time.Time,
-	billingHandler *billing.Handler,
-	billingCtx *billing.RequestContext,
-	reqCtx *requestLogContext,
 ) {
-	failedChannels := make(map[int]bool)
-	var lastError error
-	var lastFailoverError *common.FailoverError
+	common.HandleMultiChannelFailover(
+		c,
+		envCfg,
+		channelScheduler,
+		scheduler.ChannelKindMessages,
+		"Messages",
+		userID,
+		func(selection *scheduler.SelectionResult) common.MultiChannelAttemptResult {
+			upstream := selection.Upstream
+			channelIndex := selection.ChannelIndex
 
-	maxChannelAttempts := channelScheduler.GetActiveChannelCount(false)
-
-	for channelAttempt := 0; channelAttempt < maxChannelAttempts; channelAttempt++ {
-		selection, err := channelScheduler.SelectChannel(c.Request.Context(), userID, failedChannels, false)
-		if err != nil {
-			lastError = err
-			break
-		}
-
-		upstream := selection.Upstream
-		channelIndex := selection.ChannelIndex
-		if reqCtx != nil {
-			reqCtx.channelIndex = channelIndex
-			reqCtx.channelName = upstream.Name
-			reqCtx.updateLive()
-		}
-
-		if envCfg.ShouldLog("info") {
-			log.Printf("[Messages-Select] 选择渠道: [%d] %s (原因: %s, 尝试 %d/%d)",
-				channelIndex, upstream.Name, selection.Reason, channelAttempt+1, maxChannelAttempts)
-		}
-
-		success, _, _, failoverErr := tryChannelWithAllKeys(c, envCfg, cfgManager, channelScheduler, upstream, channelIndex, bodyBytes, claudeReq, startTime, billingHandler, billingCtx, reqCtx)
-
-		if success {
-			if selection.Reason == "trace_affinity" {
-				channelScheduler.UpdateTraceAffinity(userID)
-			}
-			return
-		}
-
-		failedChannels[channelIndex] = true
-
-		if failoverErr != nil {
-			lastFailoverError = failoverErr
-			lastError = fmt.Errorf("渠道 [%d] %s 失败", channelIndex, upstream.Name)
-		}
-
-		log.Printf("[Messages-Failover] 警告: 渠道 [%d] %s 所有密钥都失败，尝试下一个渠道", channelIndex, upstream.Name)
-	}
-
-	log.Printf("[Messages-Error] 所有渠道都失败了")
-	if reqCtx != nil {
-		reqCtx.success = false
-		if lastError != nil {
-			reqCtx.errorMsg = truncateErrorMessage(lastError.Error())
-		} else if lastFailoverError != nil {
-			reqCtx.errorMsg = truncateErrorMessage(string(lastFailoverError.Body))
-		}
-	}
-	common.HandleAllChannelsFailed(c, cfgManager.GetFuzzyModeEnabled(), lastFailoverError, lastError, "Messages")
-}
-
-// tryChannelWithAllKeys 尝试使用渠道的所有密钥（纯 failover 模式）
-// 返回: success, successKey, successBaseURLIdx, failoverError
-func tryChannelWithAllKeys(
-	c *gin.Context,
-	envCfg *config.EnvConfig,
-	cfgManager *config.ConfigManager,
-	channelScheduler *scheduler.ChannelScheduler,
-	upstream *config.UpstreamConfig,
-	channelIndex int,
-	bodyBytes []byte,
-	claudeReq types.ClaudeRequest,
-	startTime time.Time,
-	billingHandler *billing.Handler,
-	billingCtx *billing.RequestContext,
-	reqCtx *requestLogContext,
-) (bool, string, int, *common.FailoverError) {
-	if len(upstream.APIKeys) == 0 {
-		return false, "", 0, nil
-	}
-
-	provider := providers.GetProvider(upstream.ServiceType)
-	if provider == nil {
-		return false, "", 0, nil
-	}
-
-	metricsManager := channelScheduler.GetMessagesMetricsManager()
-	baseURLs := upstream.GetAllBaseURLs()
-
-	// 获取动态排序后的 URL 列表（非阻塞，立即返回）
-	sortedURLResults := channelScheduler.GetSortedURLsForChannel(channelIndex, baseURLs)
-
-	var lastFailoverError *common.FailoverError
-	deprioritizeCandidates := make(map[string]bool)
-
-	// 强制探测模式
-	forceProbeMode := common.AreAllKeysSuspended(metricsManager, upstream.BaseURL, upstream.APIKeys)
-	if forceProbeMode {
-		log.Printf("[Messages-ForceProbe] 渠道 %s 所有 Key 都被熔断，启用强制探测模式", upstream.Name)
-	}
-
-	// 纯 failover：按预热排序遍历所有 BaseURL，每个 BaseURL 尝试所有 Key
-	for sortedIdx, urlResult := range sortedURLResults {
-		currentBaseURL := urlResult.URL
-		originalIdx := urlResult.OriginalIdx // 原始索引用于指标记录
-		failedKeys := make(map[string]bool)  // 每个 BaseURL 重置失败 Key 列表
-		maxRetries := len(upstream.APIKeys)
-
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			common.RestoreRequestBody(c, bodyBytes)
-
-			// 按优先级顺序选择下一个可用 Key
-			apiKey, err := cfgManager.GetNextAPIKey(upstream, failedKeys)
-			if err != nil {
-				break // 当前 BaseURL 没有可用 Key，尝试下一个 BaseURL
-			}
-			if reqCtx != nil {
-				reqCtx.channelIndex = channelIndex
-				reqCtx.channelName = upstream.Name
-				reqCtx.apiKey = apiKey
-				reqCtx.updateLive()
+			if upstream == nil {
+				return common.MultiChannelAttemptResult{}
 			}
 
-			// 检查熔断状态
-			if !forceProbeMode && metricsManager.ShouldSuspendKey(currentBaseURL, apiKey) {
-				failedKeys[apiKey] = true
-				log.Printf("[Messages-Circuit] 跳过熔断中的 Key: %s", utils.MaskAPIKey(apiKey))
-				continue
+			provider := providers.GetProvider(upstream.ServiceType)
+			if provider == nil {
+				return common.MultiChannelAttemptResult{}
 			}
 
-			if envCfg.ShouldLog("info") {
-				log.Printf("[Messages-Key] 使用API密钥: %s (BaseURL %d/%d, 尝试 %d/%d)", utils.MaskAPIKey(apiKey), sortedIdx+1, len(sortedURLResults), attempt+1, maxRetries)
-			}
+			metricsManager := channelScheduler.GetMessagesMetricsManager()
+			baseURLs := upstream.GetAllBaseURLs()
+			sortedURLResults := channelScheduler.GetSortedURLsForChannel(scheduler.ChannelKindMessages, channelIndex, baseURLs)
 
-			// 使用深拷贝避免并发修改问题
-			upstreamCopy := upstream.Clone()
-			upstreamCopy.BaseURL = currentBaseURL
-
-			providerReq, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
-
-			if err != nil {
-				if asClientError(err) != nil {
-					if reqCtx != nil {
-						reqCtx.success = false
-						reqCtx.errorMsg = truncateErrorMessage(err.Error())
-					}
-					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-					return true, "", 0, nil
-				}
-
-				log.Printf("[Messages-Convert] ConvertToProviderRequest 失败: %v", err)
-				if reqCtx != nil {
-					reqCtx.success = false
-					reqCtx.errorMsg = truncateErrorMessage(err.Error())
-				}
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert request"})
-				return true, "", 0, nil
-			}
-
-			resp, err := common.SendRequest(providerReq, upstream, envCfg, claudeReq.Stream)
-			if err != nil {
-				failedKeys[apiKey] = true
-				cfgManager.MarkKeyAsFailed(apiKey)
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-				// 网络错误（超时等）触发 URL 动态降级
-				channelScheduler.MarkURLFailure(channelIndex, currentBaseURL)
-				log.Printf("[Messages-Key] 警告: API密钥失败: %v", err)
-				continue
-			}
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				respBodyBytes, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				respBodyBytes = utils.DecompressGzipIfNeeded(resp, respBodyBytes)
-
-				shouldFailover, isQuotaRelated := common.ShouldRetryWithNextKey(resp.StatusCode, respBodyBytes, cfgManager.GetFuzzyModeEnabled())
-				log.Printf("[Messages-Failover] ShouldRetryWithNextKey: statusCode=%d, shouldFailover=%v, isQuotaRelated=%v", resp.StatusCode, shouldFailover, isQuotaRelated)
-				if shouldFailover {
-					failedKeys[apiKey] = true
-					cfgManager.MarkKeyAsFailed(apiKey)
-					channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-					// HTTP 5xx 等错误也触发 URL 动态降级
-					channelScheduler.MarkURLFailure(channelIndex, currentBaseURL)
-					log.Printf("[Messages-Key] 警告: API密钥失败 (状态: %d)，尝试下一个密钥", resp.StatusCode)
-
-					if envCfg.EnableResponseLogs && envCfg.IsDevelopment() {
-						var formattedBody string
-						if envCfg.RawLogOutput {
-							formattedBody = utils.FormatJSONBytesRaw(respBodyBytes)
-						} else {
-							formattedBody = utils.FormatJSONBytesForLog(respBodyBytes, 500)
-						}
-						log.Printf("[Messages-Error] 失败原因:\n%s", formattedBody)
-					} else if envCfg.EnableResponseLogs {
-						log.Printf("[Messages-Error] 失败原因: %s", string(respBodyBytes))
-					}
-
-					lastFailoverError = &common.FailoverError{
-						Status: resp.StatusCode,
-						Body:   respBodyBytes,
-					}
-
-					if isQuotaRelated {
-						deprioritizeCandidates[apiKey] = true
-						log.Printf("[Messages-Key] 标记密钥为配额相关失败，待降级: %s", utils.MaskAPIKey(apiKey))
-					}
-					continue
-				}
-
-				// 非 failover 错误，记录失败指标后直接返回
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-				if reqCtx != nil {
-					reqCtx.success = false
-					reqCtx.errorMsg = truncateErrorMessage(string(respBodyBytes))
-				}
-				c.Data(resp.StatusCode, "application/json", respBodyBytes)
-				return true, "", 0, nil
-			}
-
-			// 处理成功响应
-			if len(deprioritizeCandidates) > 0 {
-				for key := range deprioritizeCandidates {
-					if err := cfgManager.DeprioritizeAPIKey(key); err != nil {
+			handled, successKey, successBaseURLIdx, failoverErr, usage, lastErr := common.TryUpstreamWithAllKeys(
+				c,
+				envCfg,
+				cfgManager,
+				channelScheduler,
+				scheduler.ChannelKindMessages,
+				"Messages",
+				metricsManager,
+				upstream,
+				sortedURLResults,
+				bodyBytes,
+				claudeReq.Stream,
+				func(upstream *config.UpstreamConfig, failedKeys map[string]bool) (string, error) {
+					return cfgManager.GetNextAPIKey(upstream, failedKeys, "Messages")
+				},
+				func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+					req, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
+					return req, err
+				},
+				func(apiKey string) {
+					if err := cfgManager.DeprioritizeAPIKey(apiKey); err != nil {
 						log.Printf("[Messages-Key] 警告: 密钥降级失败: %v", err)
 					}
-				}
-			}
-
-			// 标记 URL 成功，触发动态排序优化
-			channelScheduler.MarkURLSuccess(channelIndex, currentBaseURL)
-
-			if claudeReq.Stream {
-				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstreamCopy, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
-				if reqCtx != nil {
-					reqCtx.usage = usage
-					reqCtx.costCents = costCents
-					reqCtx.success = streamErr == nil
-					if streamErr != nil {
-						reqCtx.errorMsg = truncateErrorMessage(streamErr.Error())
+				},
+				func(url string) {
+					channelScheduler.MarkURLFailure(scheduler.ChannelKindMessages, channelIndex, url)
+				},
+				func(url string) {
+					channelScheduler.MarkURLSuccess(scheduler.ChannelKindMessages, channelIndex, url)
+				},
+				func(c *gin.Context, resp *http.Response, upstreamCopy *config.UpstreamConfig, apiKey string) (*types.Usage, error) {
+					if claudeReq.Stream {
+						return common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstreamCopy, bodyBytes, claudeReq.Model)
 					}
-				}
-			} else {
-				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstreamCopy, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
-			}
-			return true, apiKey, originalIdx, nil
-		}
-		// 当前 BaseURL 的所有 Key 都失败，记录并尝试下一个 BaseURL
-		if sortedIdx < len(sortedURLResults)-1 {
-			log.Printf("[Messages-BaseURL] BaseURL %d/%d 所有 Key 失败，切换到下一个 BaseURL", sortedIdx+1, len(sortedURLResults))
-		}
-	}
+					return handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, upstreamCopy, apiKey)
+				},
+			)
 
-	return false, "", 0, lastFailoverError
+			return common.MultiChannelAttemptResult{
+				Handled:           handled,
+				Attempted:         true,
+				SuccessKey:        successKey,
+				SuccessBaseURLIdx: successBaseURLIdx,
+				FailoverError:     failoverErr,
+				Usage:             usage,
+				LastError:         lastErr,
+			}
+		},
+		nil,
+		func(ctx *gin.Context, failoverErr *common.FailoverError, lastError error) {
+			common.HandleAllChannelsFailed(ctx, cfgManager.GetFuzzyModeEnabled(), failoverErr, lastError, "Messages")
+		},
+	)
 }
 
 // handleSingleChannel 处理单渠道代理请求
@@ -540,16 +164,9 @@ func handleSingleChannel(
 	bodyBytes []byte,
 	claudeReq types.ClaudeRequest,
 	startTime time.Time,
-	billingHandler *billing.Handler,
-	billingCtx *billing.RequestContext,
-	reqCtx *requestLogContext,
 ) {
 	upstream, err := cfgManager.GetCurrentUpstream()
 	if err != nil {
-		if reqCtx != nil {
-			reqCtx.success = false
-			reqCtx.errorMsg = "未配置任何渠道"
-		}
 		c.JSON(503, gin.H{
 			"error": "未配置任何渠道，请先在管理界面添加渠道",
 			"code":  "NO_UPSTREAM",
@@ -558,13 +175,6 @@ func handleSingleChannel(
 	}
 
 	if len(upstream.APIKeys) == 0 {
-		if reqCtx != nil {
-			reqCtx.channelIndex = 0
-			reqCtx.channelName = upstream.Name
-			reqCtx.success = false
-			reqCtx.errorMsg = "未配置API密钥"
-			reqCtx.updateLive()
-		}
 		c.JSON(503, gin.H{
 			"error": fmt.Sprintf("当前渠道 \"%s\" 未配置API密钥", upstream.Name),
 			"code":  "NO_API_KEYS",
@@ -574,210 +184,53 @@ func handleSingleChannel(
 
 	provider := providers.GetProvider(upstream.ServiceType)
 	if provider == nil {
-		if reqCtx != nil {
-			reqCtx.channelIndex = 0
-			reqCtx.channelName = upstream.Name
-			reqCtx.success = false
-			reqCtx.errorMsg = "Unsupported service type"
-			reqCtx.updateLive()
-		}
 		c.JSON(400, gin.H{"error": "Unsupported service type"})
 		return
-	}
-
-	if reqCtx != nil {
-		reqCtx.channelIndex = 0
-		reqCtx.channelName = upstream.Name
-		reqCtx.updateLive()
 	}
 
 	metricsManager := channelScheduler.GetMessagesMetricsManager()
 	baseURLs := upstream.GetAllBaseURLs()
 
-	var lastError error
-	var lastFailoverError *common.FailoverError
-	deprioritizeCandidates := make(map[string]bool)
+	urlResults := common.BuildDefaultURLResults(baseURLs)
 
-	// 强制探测模式：检查首个 BaseURL 的所有 Key 是否都被熔断
-	forceProbeMode := common.AreAllKeysSuspended(metricsManager, baseURLs[0], upstream.APIKeys)
-	if forceProbeMode {
-		log.Printf("[Messages-ForceProbe] 渠道 %s 所有 Key 都被熔断，启用强制探测模式", upstream.Name)
-	}
-
-	// 纯 failover：遍历所有 BaseURL，每个 BaseURL 尝试所有 Key
-	for baseURLIdx, currentBaseURL := range baseURLs {
-		failedKeys := make(map[string]bool) // 每个 BaseURL 重置失败 Key 列表
-		maxRetries := len(upstream.APIKeys)
-
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			common.RestoreRequestBody(c, bodyBytes)
-
-			apiKey, err := cfgManager.GetNextAPIKey(upstream, failedKeys)
-			if err != nil {
-				lastError = err
-				break // 当前 BaseURL 没有可用 Key，尝试下一个 BaseURL
+	handled, _, _, lastFailoverError, _, lastError := common.TryUpstreamWithAllKeys(
+		c,
+		envCfg,
+		cfgManager,
+		channelScheduler,
+		scheduler.ChannelKindMessages,
+		"Messages",
+		metricsManager,
+		upstream,
+		urlResults,
+		bodyBytes,
+		claudeReq.Stream,
+		func(upstream *config.UpstreamConfig, failedKeys map[string]bool) (string, error) {
+			return cfgManager.GetNextAPIKey(upstream, failedKeys, "Messages")
+		},
+		func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+			req, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
+			return req, err
+		},
+		func(apiKey string) {
+			if err := cfgManager.DeprioritizeAPIKey(apiKey); err != nil {
+				log.Printf("[Messages-Key] 警告: 密钥降级失败: %v", err)
 			}
-			if reqCtx != nil {
-				reqCtx.apiKey = apiKey
-				reqCtx.updateLive()
-			}
-
-			// 检查熔断状态
-			if !forceProbeMode && metricsManager.ShouldSuspendKey(currentBaseURL, apiKey) {
-				failedKeys[apiKey] = true
-				log.Printf("[Messages-Circuit] 跳过熔断中的 Key: %s", utils.MaskAPIKey(apiKey))
-				continue
-			}
-
-			if envCfg.ShouldLog("info") {
-				log.Printf("[Messages-Upstream] 使用上游: %s - %s (BaseURL %d/%d, 尝试 %d/%d)", upstream.Name, currentBaseURL, baseURLIdx+1, len(baseURLs), attempt+1, maxRetries)
-				log.Printf("[Messages-Key] 使用API密钥: %s", utils.MaskAPIKey(apiKey))
-			}
-
-			// 使用深拷贝避免并发修改问题
-			upstreamCopy := upstream.Clone()
-			upstreamCopy.BaseURL = currentBaseURL
-
-			providerReq, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
-
-			if err != nil {
-				if asClientError(err) != nil {
-					if reqCtx != nil {
-						reqCtx.success = false
-						reqCtx.errorMsg = truncateErrorMessage(err.Error())
-					}
-					c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-					return
-				}
-
-				log.Printf("[Messages-Convert] ConvertToProviderRequest 失败: %v", err)
-				if reqCtx != nil {
-					reqCtx.success = false
-					reqCtx.errorMsg = truncateErrorMessage(err.Error())
-				}
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert request"})
-				return
-			}
-
-			resp, err := common.SendRequest(providerReq, upstream, envCfg, claudeReq.Stream)
-			if err != nil {
-				lastError = err
-				failedKeys[apiKey] = true
-				cfgManager.MarkKeyAsFailed(apiKey)
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-				log.Printf("[Messages-Key] 警告: API密钥失败: %v", err)
-				continue
-			}
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				respBodyBytes, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				respBodyBytes = utils.DecompressGzipIfNeeded(resp, respBodyBytes)
-
-				shouldFailover, isQuotaRelated := common.ShouldRetryWithNextKey(resp.StatusCode, respBodyBytes, cfgManager.GetFuzzyModeEnabled())
-				log.Printf("[Messages-Failover] ShouldRetryWithNextKey(SingleChannel): statusCode=%d, shouldFailover=%v, isQuotaRelated=%v", resp.StatusCode, shouldFailover, isQuotaRelated)
-				if shouldFailover {
-					lastError = fmt.Errorf("上游错误: %d", resp.StatusCode)
-					failedKeys[apiKey] = true
-					cfgManager.MarkKeyAsFailed(apiKey)
-					channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-
-					log.Printf("[Messages-Key] 警告: API密钥失败 (状态: %d)，尝试下一个密钥", resp.StatusCode)
-					if envCfg.EnableResponseLogs && envCfg.IsDevelopment() {
-						var formattedBody string
-						if envCfg.RawLogOutput {
-							formattedBody = utils.FormatJSONBytesRaw(respBodyBytes)
-						} else {
-							formattedBody = utils.FormatJSONBytesForLog(respBodyBytes, 500)
-						}
-						log.Printf("[Messages-Error] 失败原因:\n%s", formattedBody)
-					} else if envCfg.EnableResponseLogs {
-						log.Printf("[Messages-Error] 失败原因: %s", string(respBodyBytes))
-					}
-
-					lastFailoverError = &common.FailoverError{
-						Status: resp.StatusCode,
-						Body:   respBodyBytes,
-					}
-
-					if isQuotaRelated {
-						deprioritizeCandidates[apiKey] = true
-						log.Printf("[Messages-Key] 标记密钥为配额相关失败，待降级: %s", utils.MaskAPIKey(apiKey))
-					}
-					continue
-				}
-
-				// 非 failover 错误，记录失败指标后返回
-				if envCfg.EnableResponseLogs {
-					log.Printf("[Messages-Response] 警告: 上游返回错误: %d", resp.StatusCode)
-					if envCfg.IsDevelopment() {
-						var formattedBody string
-						if envCfg.RawLogOutput {
-							formattedBody = utils.FormatJSONBytesRaw(respBodyBytes)
-						} else {
-							formattedBody = utils.FormatJSONBytesForLog(respBodyBytes, 500)
-						}
-						log.Printf("[Messages-Response] 错误响应体:\n%s", formattedBody)
-
-						respHeaders := make(map[string]string)
-						for key, values := range resp.Header {
-							if len(values) > 0 {
-								respHeaders[key] = values[0]
-							}
-						}
-						var respHeadersJSON []byte
-						if envCfg.RawLogOutput {
-							respHeadersJSON, _ = json.Marshal(respHeaders)
-						} else {
-							respHeadersJSON, _ = json.MarshalIndent(respHeaders, "", "  ")
-						}
-						log.Printf("[Messages-Response] 错误响应头:\n%s", string(respHeadersJSON))
-					}
-				}
-				channelScheduler.RecordFailure(currentBaseURL, apiKey, false)
-				if reqCtx != nil {
-					reqCtx.success = false
-					reqCtx.errorMsg = truncateErrorMessage(string(respBodyBytes))
-				}
-				c.Data(resp.StatusCode, "application/json", respBodyBytes)
-				return
-			}
-
-			// 处理成功响应
-			if len(deprioritizeCandidates) > 0 {
-				for key := range deprioritizeCandidates {
-					if err := cfgManager.DeprioritizeAPIKey(key); err != nil {
-						log.Printf("[Messages-Key] 警告: 密钥降级失败: %v", err)
-					}
-				}
-			}
-
+		},
+		nil,
+		nil,
+		func(c *gin.Context, resp *http.Response, upstreamCopy *config.UpstreamConfig, apiKey string) (*types.Usage, error) {
 			if claudeReq.Stream {
-				usage, costCents, streamErr := common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstreamCopy, bodyBytes, channelScheduler, apiKey, billingHandler, billingCtx, claudeReq.Model, claudeReq.Model)
-				if reqCtx != nil {
-					reqCtx.usage = usage
-					reqCtx.costCents = costCents
-					reqCtx.success = streamErr == nil
-					if streamErr != nil {
-						reqCtx.errorMsg = truncateErrorMessage(streamErr.Error())
-					}
-				}
-			} else {
-				handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, channelScheduler, upstreamCopy, apiKey, billingHandler, billingCtx, claudeReq.Model, reqCtx)
+				return common.HandleStreamResponse(c, resp, provider, envCfg, startTime, upstreamCopy, bodyBytes, claudeReq.Model)
 			}
-			return
-		}
+			return handleNormalResponse(c, resp, provider, envCfg, startTime, bodyBytes, upstreamCopy, apiKey)
+		},
+	)
+	if handled {
+		return
 	}
 
 	log.Printf("[Messages-Error] 所有API密钥都失败了")
-	if reqCtx != nil {
-		reqCtx.success = false
-		if lastError != nil {
-			reqCtx.errorMsg = truncateErrorMessage(lastError.Error())
-		} else if lastFailoverError != nil {
-			reqCtx.errorMsg = truncateErrorMessage(string(lastFailoverError.Body))
-		}
-	}
 	common.HandleAllKeysFailed(c, cfgManager.GetFuzzyModeEnabled(), lastFailoverError, lastError, "Messages")
 }
 
@@ -789,20 +242,15 @@ func handleNormalResponse(
 	envCfg *config.EnvConfig,
 	startTime time.Time,
 	requestBody []byte,
-	channelScheduler *scheduler.ChannelScheduler,
 	upstream *config.UpstreamConfig,
 	apiKey string,
-	billingHandler *billing.Handler,
-	billingCtx *billing.RequestContext,
-	model string,
-	reqCtx *requestLogContext,
-) {
+) (*types.Usage, error) {
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to read response"})
-		return
+		return nil, err
 	}
 
 	if envCfg.EnableResponseLogs {
@@ -843,7 +291,7 @@ func handleNormalResponse(
 	claudeResp, err := provider.ConvertToClaudeResponse(providerResp)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "Failed to convert response"})
-		return
+		return nil, err
 	}
 
 	// Token 补全逻辑
@@ -902,30 +350,12 @@ func handleNormalResponse(
 
 	c.JSON(200, claudeResp)
 
-	// 计算成本
-	var costCents int64
-	if billingHandler != nil && claudeResp.Usage != nil {
-		costCents = billingHandler.CalculateCost(model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens, claudeResp.Usage.CacheCreationInputTokens, claudeResp.Usage.CacheReadInputTokens)
-	}
-
-	// 记录成功指标
-	channelScheduler.RecordSuccessWithUsage(upstream.BaseURL, apiKey, claudeResp.Usage, false, model, costCents)
-	if reqCtx != nil {
-		reqCtx.usage = claudeResp.Usage
-		reqCtx.costCents = costCents
-		reqCtx.success = true
-		reqCtx.errorMsg = ""
-	}
-
-	// 计费扣费
-	if billingHandler != nil && billingCtx != nil && claudeResp.Usage != nil {
-		billingHandler.AfterRequest(billingCtx, model, claudeResp.Usage.InputTokens, claudeResp.Usage.OutputTokens, claudeResp.Usage.CacheCreationInputTokens, claudeResp.Usage.CacheReadInputTokens)
-	}
-
 	if envCfg.EnableResponseLogs {
 		responseTime := time.Since(startTime).Milliseconds()
 		log.Printf("[Messages-Timing] 响应发送完成: %dms, 状态: %d", responseTime, resp.StatusCode)
 	}
+
+	return claudeResp.Usage, nil
 }
 
 // CountTokensHandler 处理 /v1/messages/count_tokens 请求

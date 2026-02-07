@@ -21,7 +21,7 @@
           <v-btn value="today" size="x-small">今日</v-btn>
         </v-btn-toggle>
 
-        <v-btn icon size="x-small" variant="text" @click="refreshData" :loading="isLoading" :disabled="isLoading">
+        <v-btn icon size="x-small" variant="text" :loading="isLoading" :disabled="isLoading" @click="refreshData">
           <v-icon size="small">mdi-refresh</v-icon>
         </v-btn>
       </div>
@@ -104,7 +104,8 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useTheme } from 'vuetify'
 import VueApexCharts from 'vue3-apexcharts'
-import { api, type GlobalStatsHistoryResponse, type GlobalHistoryDataPoint, type GlobalStatsSummary } from '../services/api'
+import type { ApexOptions } from 'apexcharts'
+import { api, type GlobalStatsHistoryResponse, type GlobalHistoryDataPoint as _GlobalHistoryDataPoint, type GlobalStatsSummary } from '../services/api'
 
 // Register apexchart component
 const apexchart = VueApexCharts
@@ -226,7 +227,7 @@ const formatCost = (cents: number): string => {
 }
 
 // Chart options
-const chartOptions = computed(() => {
+const chartOptions = computed<ApexOptions>(() => {
   const mode = selectedView.value
 
   return {
@@ -253,7 +254,7 @@ const chartOptions = computed(() => {
           ? [chartColors.cost.total]
           : [chartColors.cache.creation, chartColors.cache.read],
     fill: {
-      type: 'gradient',
+      type: 'gradient' as const,
       gradient: {
         shadeIntensity: 1,
         opacityFrom: 0.4,
@@ -265,7 +266,7 @@ const chartOptions = computed(() => {
       enabled: false
     },
     stroke: {
-      curve: 'smooth',
+      curve: 'smooth' as const,
       width: 2,
       dashArray: mode === 'tokens' || mode === 'cache' ? [0, 5] : 0
     },
@@ -332,10 +333,10 @@ const chartOptions = computed(() => {
     },
     legend: {
       show: true,
-      position: 'top',
-      horizontalAlign: 'right',
+      position: 'top' as const,
+      horizontalAlign: 'right' as const,
       fontSize: '11px',
-      markers: { width: 8, height: 8 }
+      markers: { size: 4 }
     }
   }
 })
@@ -436,7 +437,7 @@ const refreshData = async (isAutoRefresh = false) => {
     if (canUpdateInPlace) {
       historyData.value = newData
       const series = chartSeries.value
-      chartRef.value.updateSeries(series, false)
+      chartRef.value?.updateSeries(series, false)
     } else {
       historyData.value = newData
     }

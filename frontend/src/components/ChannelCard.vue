@@ -31,8 +31,8 @@
             </div>
             <!-- 官网图标按钮（紧贴标题右侧） -->
             <v-tooltip v-if="channel.website" text="打开官网" location="bottom" :open-delay="150">
-              <template #activator="{ props }">
-                <v-btn v-bind="props" :href="channel.website" target="_blank" rel="noopener" size="small" variant="text" color="primary" icon>
+              <template #activator="{ props: tooltipProps }">
+                <v-btn v-bind="tooltipProps" :href="channel.website" target="_blank" rel="noopener" size="small" variant="text" color="primary" icon>
                   <v-icon size="18">mdi-open-in-new</v-icon>
                 </v-btn>
               </template>
@@ -107,7 +107,6 @@
             <code class="text-caption bg-surface pa-1 rounded">{{ channel.baseUrl }}</code>
           </div>
         </div>
-
         
       </div>
 
@@ -115,8 +114,8 @@
       <div class="d-flex align-center justify-end ga-4 mb-4">
         <div class="status-indicator">
           <v-tooltip :text="getStatusTooltip()" location="bottom" :open-delay="150">
-            <template #activator="{ props }">
-              <div class="status-badge cursor-help" v-bind="props" :class="`status-${channel.status || 'unknown'}`">
+            <template #activator="{ props: tooltipProps }">
+              <div class="status-badge cursor-help" v-bind="tooltipProps" :class="`status-${channel.status || 'unknown'}`">
                 <v-icon 
                   :color="getStatusColor()"
                   size="16"
@@ -185,24 +184,24 @@
                 <div class="d-flex align-center ga-1">
                   <!-- 置顶按钮：仅最后一个 key 显示 -->
                   <v-tooltip v-if="index === channel.apiKeys.length - 1 && channel.apiKeys.length > 1" text="置顶" location="top" :open-delay="150">
-                    <template #activator="{ props }">
-                      <v-btn v-bind="props" size="x-small" color="warning" icon variant="text" rounded="md" @click="$emit('moveKeyToTop', channel.index, key)">
+                    <template #activator="{ props: tooltipProps }">
+                      <v-btn v-bind="tooltipProps" size="x-small" color="warning" icon variant="text" rounded="md" @click="$emit('moveKeyToTop', channel.index, key)">
                         <v-icon size="small">mdi-arrow-up-bold</v-icon>
                       </v-btn>
                     </template>
                   </v-tooltip>
                   <!-- 置底按钮：仅第一个 key 显示 -->
                   <v-tooltip v-if="index === 0 && channel.apiKeys.length > 1" text="置底" location="top" :open-delay="150">
-                    <template #activator="{ props }">
-                      <v-btn v-bind="props" size="x-small" color="warning" icon variant="text" rounded="md" @click="$emit('moveKeyToBottom', channel.index, key)">
+                    <template #activator="{ props: tooltipProps }">
+                      <v-btn v-bind="tooltipProps" size="x-small" color="warning" icon variant="text" rounded="md" @click="$emit('moveKeyToBottom', channel.index, key)">
                         <v-icon size="small">mdi-arrow-down-bold</v-icon>
                       </v-btn>
                     </template>
                   </v-tooltip>
                   <v-tooltip :text="copiedKeyIndex === index ? '已复制!' : '复制密钥'" location="top" :open-delay="150">
-                    <template #activator="{ props }">
+                    <template #activator="{ props: tooltipProps }">
                       <v-btn
-                        v-bind="props"
+                        v-bind="tooltipProps"
                         size="x-small"
                         :color="copiedKeyIndex === index ? 'success' : 'primary'"
                         icon
@@ -243,8 +242,8 @@
           variant="outlined"
           rounded="lg"
           class="action-btn"
-          @click="$emit('ping', channel.index)"
           prepend-icon="mdi-speedometer"
+          @click="$emit('ping', channel.index)"
         >
           测试延迟
         </v-btn>
@@ -255,8 +254,8 @@
           variant="outlined"
           rounded="lg"
           class="action-btn"
-          @click="$emit('edit', channel)"
           prepend-icon="mdi-pencil"
+          @click="$emit('edit', channel)"
         >
           编辑
         </v-btn>
@@ -267,8 +266,8 @@
           variant="text"
           rounded="lg"
           class="action-btn danger-action"
-          @click="$emit('delete', channel.index)"
           prepend-icon="mdi-delete"
+          @click="$emit('delete', channel.index)"
         >
           删除
         </v-btn>

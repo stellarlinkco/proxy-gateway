@@ -78,15 +78,15 @@ func (p *ResponsesProvider) ConvertToProviderRequest(
 		providerReq = convertedReq
 	}
 
-	// 4. 序列化请求体
-	reqBody, err := json.Marshal(providerReq)
+	// 4. 序列化请求体（禁用 HTML 转义）
+	reqBody, err := utils.MarshalJSONNoEscape(providerReq)
 	if err != nil {
 		return nil, bodyBytes, fmt.Errorf("序列化请求失败: %w", err)
 	}
 
 	// 7. 构建 HTTP 请求
 	targetURL := p.buildTargetURL(upstream)
-	req, err := http.NewRequest("POST", targetURL, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(c.Request.Context(), "POST", targetURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, bodyBytes, err
 	}

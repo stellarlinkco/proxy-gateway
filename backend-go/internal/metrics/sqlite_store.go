@@ -30,10 +30,11 @@ type SQLiteStore struct {
 	retentionDays int           // 数据保留天数
 
 	// 控制
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
-	closed  bool           // 是否已关闭
-	flushWg sync.WaitGroup // 追踪异步 flush goroutine
+	stopCh       chan struct{}
+	wg           sync.WaitGroup
+	closed       bool           // 是否已关闭
+	flushMu      sync.Mutex     // 串行化 flush 与 delete 操作，避免并发竞态
+	asyncFlushWg sync.WaitGroup // 追踪 AddRecord 触发的异步 flush goroutine
 }
 
 // SQLiteStoreConfig SQLite 存储配置
@@ -279,10 +280,13 @@ func (s *SQLiteStore) AddRecord(record PersistentRecord) {
 	s.bufferMu.Unlock()
 
 	if shouldFlush {
-		s.flushWg.Add(1)
+		s.asyncFlushWg.Add(1)
 		go func() {
-			defer s.flushWg.Done()
+			defer s.asyncFlushWg.Done()
+			// 获取 flush 锁，与 DeleteRecordsByMetricsKeys 串行化
+			s.flushMu.Lock()
 			s.flush()
+			s.flushMu.Unlock()
 		}()
 	}
 }
@@ -452,6 +456,56 @@ func (s *SQLiteStore) CleanupOldRecords(before time.Time) (int64, error) {
 	return result.RowsAffected()
 }
 
+// DeleteRecordsByMetricsKeys 按 metrics_key 和 api_type 批量删除记录
+// apiType: 接口类型（messages/responses/gemini），避免误删其他接口的数据
+func (s *SQLiteStore) DeleteRecordsByMetricsKeys(metricsKeys []string, apiType string) (int64, error) {
+	if len(metricsKeys) == 0 {
+		return 0, nil
+	}
+
+	// 获取 flush 锁，确保删除期间不会有后台 flush 写入新记录
+	s.flushMu.Lock()
+	defer s.flushMu.Unlock()
+
+	// 先刷新缓冲区，确保待删除的记录已写入数据库
+	s.flush()
+
+	// 分批删除，避免触发 SQLite 变量上限（默认 999）
+	const batchSize = 500
+	var totalDeleted int64
+
+	for i := 0; i < len(metricsKeys); i += batchSize {
+		end := i + batchSize
+		if end > len(metricsKeys) {
+			end = len(metricsKeys)
+		}
+		batch := metricsKeys[i:end]
+
+		// 构建 IN 子句的占位符
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)+1)
+		args = append(args, apiType) // 第一个参数是 api_type
+		for j, key := range batch {
+			placeholders[j] = "?"
+			args = append(args, key)
+		}
+
+		query := fmt.Sprintf(
+			"DELETE FROM request_records WHERE api_type = ? AND metrics_key IN (%s)",
+			strings.Join(placeholders, ","),
+		)
+
+		result, err := s.db.Exec(query, args...)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("batch %d-%d failed: %w", i, end, err)
+		}
+		affected, _ := result.RowsAffected()
+		totalDeleted += affected
+	}
+
+	return totalDeleted, nil
+}
+
 // flushLoop 定时刷新循环
 func (s *SQLiteStore) flushLoop() {
 	defer s.wg.Done()
@@ -461,9 +515,15 @@ func (s *SQLiteStore) flushLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			// 获取 flush 锁，与 DeleteRecordsByMetricsKeys 串行化
+			s.flushMu.Lock()
 			s.flush()
+			s.flushMu.Unlock()
 		case <-s.stopCh:
-			s.flush() // 关闭前最后一次刷新
+			// 关闭前最后一次刷新
+			s.flushMu.Lock()
+			s.flush()
+			s.flushMu.Unlock()
 			return
 		}
 	}
@@ -511,12 +571,12 @@ func (s *SQLiteStore) Close() error {
 	s.closed = true
 	s.bufferMu.Unlock()
 
-	// 停止后台循环
+	// 停止后台循环（flushLoop 会在退出前执行最后一次 flush）
 	close(s.stopCh)
 	s.wg.Wait()
 
-	// 等待所有异步 flush 完成
-	s.flushWg.Wait()
+	// 等待所有 AddRecord 触发的异步 flush goroutine 完成
+	s.asyncFlushWg.Wait()
 
 	// 关闭前最后尽力刷新（避免 flush 失败导致残留缓冲）
 	for i := 0; i < maxFlushRetries; i++ {

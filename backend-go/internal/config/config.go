@@ -18,7 +18,8 @@ type UpstreamConfig struct {
 	BaseURL            string            `json:"baseUrl"`
 	BaseURLs           []string          `json:"baseUrls,omitempty"` // 多 BaseURL 支持（failover 模式）
 	APIKeys            []string          `json:"apiKeys"`
-	ServiceType        string            `json:"serviceType"` // gemini, openai, claude
+	HistoricalAPIKeys  []string          `json:"historicalApiKeys,omitempty"` // 历史 API Key（用于统计聚合，换 Key 后保留旧 Key 的统计数据）
+	ServiceType        string            `json:"serviceType"`                 // gemini, openai, claude
 	Name               string            `json:"name,omitempty"`
 	Description        string            `json:"description,omitempty"`
 	Website            string            `json:"website,omitempty"`
@@ -30,6 +31,9 @@ type UpstreamConfig struct {
 	PromotionUntil *time.Time `json:"promotionUntil,omitempty"` // 促销期截止时间，在此期间内优先使用此渠道（忽略trace亲和）
 	Weight         int        `json:"weight,omitempty"`         // 权重：加权随机调度时使用（默认 0/未配置视为 1）
 	LowQuality     bool       `json:"lowQuality,omitempty"`     // 低质量渠道标记：启用后强制本地估算 token，偏差>5%时使用本地值
+	// Gemini 特定配置
+	InjectDummyThoughtSignature bool `json:"injectDummyThoughtSignature,omitempty"` // 给空 thought_signature 注入 dummy 值（兼容 x666.me 等要求必须有该字段的 API）
+	StripThoughtSignature       bool `json:"stripThoughtSignature,omitempty"`       // 移除 thought_signature 字段（兼容旧版 Gemini API）
 }
 
 // UpstreamUpdate 用于部分更新 UpstreamConfig
@@ -49,6 +53,9 @@ type UpstreamUpdate struct {
 	PromotionUntil *time.Time `json:"promotionUntil"`
 	Weight         *int       `json:"weight"`
 	LowQuality     *bool      `json:"lowQuality"`
+	// Gemini 特定配置
+	InjectDummyThoughtSignature *bool `json:"injectDummyThoughtSignature"`
+	StripThoughtSignature       *bool `json:"stripThoughtSignature"`
 }
 
 // Config 配置结构
@@ -130,8 +137,9 @@ func (cm *ConfigManager) GetConfig() Config {
 }
 
 // GetNextAPIKey 获取下一个 API 密钥（Key 轮询）
-func (cm *ConfigManager) GetNextAPIKey(upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
-	return cm.getNextAPIKeyRoundRobin("messages", upstream, failedKeys)
+// apiType: 接口类型（Messages/Responses/Gemini），用于日志标签前缀
+func (cm *ConfigManager) GetNextAPIKey(upstream *UpstreamConfig, failedKeys map[string]bool, apiType string) (string, error) {
+	return cm.getNextAPIKeyRoundRobin(apiType, upstream, failedKeys)
 }
 
 func (cm *ConfigManager) getNextAPIKeyRoundRobin(namespace string, upstream *UpstreamConfig, failedKeys map[string]bool) (string, error) {
@@ -228,7 +236,7 @@ func (cm *ConfigManager) getNextAPIKeyRoundRobin(namespace string, upstream *Ups
 
 		selectedKey := keys[idx]
 		cm.keyIndex[cursorKey] = (idx + 1) % len(keys)
-		log.Printf("[Config-Key] 轮询选择密钥 %s (%d/%d)", utils.MaskAPIKey(selectedKey), idx+1, len(keys))
+		log.Printf("[%s-Key] 轮询选择密钥 %s (%d/%d)", namespace, utils.MaskAPIKey(selectedKey), idx+1, len(keys))
 		return selectedKey, nil
 	}
 
@@ -237,7 +245,8 @@ func (cm *ConfigManager) getNextAPIKeyRoundRobin(namespace string, upstream *Ups
 }
 
 // MarkKeyAsFailed 标记密钥失败
-func (cm *ConfigManager) MarkKeyAsFailed(apiKey string) {
+// apiType: 接口类型（Messages/Responses/Gemini），用于日志标签前缀
+func (cm *ConfigManager) MarkKeyAsFailed(apiKey string, apiType string) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
@@ -257,8 +266,8 @@ func (cm *ConfigManager) MarkKeyAsFailed(apiKey string) {
 		recoveryTime = cm.keyRecoveryTime * 2
 	}
 
-	log.Printf("[Config-Key] 标记API密钥失败: %s (失败次数: %d, 恢复时间: %v)",
-		utils.MaskAPIKey(apiKey), failure.FailureCount, recoveryTime)
+	log.Printf("[%s-Key] 标记API密钥失败: %s (失败次数: %d, 恢复时间: %v)",
+		apiType, utils.MaskAPIKey(apiKey), failure.FailureCount, recoveryTime)
 }
 
 // isKeyFailed 检查密钥是否失败
@@ -286,11 +295,12 @@ func (cm *ConfigManager) IsKeyFailed(apiKey string) bool {
 
 // clearFailedKeysForUpstream 清理指定渠道的所有失败 key 记录
 // 当渠道被删除时调用，避免内存泄漏和冷却状态残留
-func (cm *ConfigManager) clearFailedKeysForUpstream(upstream *UpstreamConfig) {
+// apiType: 接口类型（Messages/Responses/Gemini），用于日志标签前缀
+func (cm *ConfigManager) clearFailedKeysForUpstream(upstream *UpstreamConfig, apiType string) {
 	for _, key := range upstream.APIKeys {
 		if _, exists := cm.failedKeysCache[key]; exists {
 			delete(cm.failedKeysCache, key)
-			log.Printf("[Config-Key] 已清理被删除渠道 %s 的失败密钥记录: %s", upstream.Name, utils.MaskAPIKey(key))
+			log.Printf("[%s-Key] 已清理被删除渠道 %s 的失败密钥记录: %s", apiType, upstream.Name, utils.MaskAPIKey(key))
 		}
 	}
 }

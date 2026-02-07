@@ -16,8 +16,7 @@ func WebAuthMiddleware(envCfg *config.EnvConfig, cfgManager *config.ConfigManage
 		path := c.Request.URL.Path
 
 		// 公开端点直接放行（健康检查固定为 /health）
-		if path == "/health" ||
-			(envCfg.IsDevelopment() && path == "/admin/dev/info") {
+		if path == "/health" {
 			c.Next()
 			return
 		}
@@ -29,7 +28,7 @@ func WebAuthMiddleware(envCfg *config.EnvConfig, cfgManager *config.ConfigManage
 		}
 
 		// API 代理端点后续处理
-		if strings.HasPrefix(path, "/v1/") {
+		if strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/v1beta/") {
 			c.Next()
 			return
 		}
@@ -132,6 +131,11 @@ func getAPIKey(c *gin.Context) string {
 	if auth := c.GetHeader("Authorization"); auth != "" {
 		// 移除 Bearer 前缀
 		return strings.TrimPrefix(auth, "Bearer ")
+	}
+
+	// 支持 Gemini SDK 的 x-goog-api-key 头部
+	if key := c.GetHeader("x-goog-api-key"); key != "" {
+		return key
 	}
 
 	return ""

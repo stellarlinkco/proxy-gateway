@@ -1,9 +1,13 @@
+> ⚠️ **项目已重命名**: 本项目已重命名为 **[CCX](https://github.com/BenedictKing/ccx)**，请访问新仓库获取最新版本和更新。本仓库已归档，不再维护。
+
+---
+
 # Claude / Codex / Gemini API Proxy
 
 [![GitHub release](https://img.shields.io/github/v/release/stellarlinkco/proxy-gateway)](https://github.com/stellarlinkco/proxy-gateway/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-一个高性能的 Claude API 代理服务器，支持多种上游 AI 服务提供商（Claude、Codex、Gemini），提供负载均衡、多 API 密钥管理和统一入口访问。
+一个高性能的 Claude API 代理服务器，支持多种上游 AI 服务提供商（Claude、Codex、Gemini），提供故障转移、多 API 密钥管理和统一入口访问。
 
 ## 🚀 功能特性
 
@@ -17,7 +21,7 @@
 - **🎯 智能调度**: 多渠道智能调度器，支持优先级排序、健康检查和自动熔断
 - **📊 渠道编排**: 可视化渠道管理，拖拽调整优先级，实时查看健康状态
 - **🔄 Trace 亲和**: 同一用户会话自动绑定到同一渠道，提升一致性体验
-- **负载均衡**: 支持轮询、随机、故障转移策略，Claude/Codex 负载均衡互不影响
+- **故障转移**: 自动切换到可用渠道，确保服务高可用
 - **多 API 密钥**: 每个上游可配置多个 API 密钥，自动轮换使用（推荐 failover 策略以最大化利用 Prompt Caching）
 - **🧠 缓存统计**: 按 Token 口径展示各渠道缓存读/写与命中率（命中率 = `cache_read_tokens / (cache_read_tokens + input_tokens)`）
 - **增强的稳定性**: 内置上游请求超时与重试机制，确保服务在网络波动时依然可靠
@@ -784,12 +788,7 @@ cd backend-go && make help
 - **📝 版本历史**: [CHANGELOG.md](CHANGELOG.md) - 完整变更记录和升级指南
 - **🚀 发布流程**: [RELEASE.md](RELEASE.md) - 维护者发布流程
 
+
 ## 📄 许可证
 
 本项目基于 MIT 许可证开源 - 查看 [LICENSE](LICENSE) 文件了解详情。
-
-## 🙏 致谢
-
-- [Anthropic](https://www.anthropic.com/) - Claude API
-- [OpenAI](https://openai.com/) - Codex API
-- [Google](https://cloud.google.com/vertex-ai) - Gemini API

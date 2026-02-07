@@ -45,4 +45,3 @@ func TestStreamOpenAIToGemini_CoversMoreBranches(t *testing.T) {
 		t.Fatalf("expected output contains data:, got=%s", w.Body.String())
 	}
 }
-

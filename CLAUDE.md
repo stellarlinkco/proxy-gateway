@@ -92,8 +92,6 @@ claude-proxy/
 | `QUIET_POLLING_LOGS` | true | 静默轮询日志 |
 | `MAX_REQUEST_BODY_SIZE_MB` | 50 | 请求体最大大小 |
 
-**注意**: 负载均衡策略通过 Web UI 或 `config.json` 配置，不再使用环境变量。
-
 完整配置参考 `backend-go/.env.example`
 
 ## 常见任务
@@ -109,6 +107,13 @@ claude-proxy/
 - **配置热重载**: `backend-go/.config/config.json` 修改后自动生效，无需重启
 - **环境变量变更**: 修改 `.env` 后需要重启服务
 - **认证**: 所有端点（除 `/health`）需要 `x-api-key` 头或 `PROXY_ACCESS_KEY`
+
+## Git 命令注意事项
+
+- 执行 `git add`/`git commit` 前确保在项目根目录
+- `git diff` 查看特定文件时使用 `--` 分隔符避免歧义：`git diff -- path/to/file`
+- 错误示例：`git diff frontend/src/file.vue`（可能报 `unknown revision` 错误）
+- 正确示例：`git diff -- frontend/src/file.vue`
 
 ## 模块文档
 

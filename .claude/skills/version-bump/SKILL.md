@@ -4,6 +4,7 @@ description: 升级项目版本号并提交git，支持patch/minor/major版本�
 version: 1.1.0
 author: https://github.com/stellarlinkco/proxy-gateway/
 allowed-tools: Bash, Read, Write
+context: fork
 ---
 
 # 版本号升级技能
@@ -49,12 +50,12 @@ cat VERSION
 
 根据用户指定的升级类型计算：
 
-| 当前版本 | 升级类型     | 新版本   |
-| -------- | ------------ | -------- |
-| v2.0.14  | patch (默认) | v2.0.15  |
-| v2.0.14  | minor        | v2.1.0   |
-| v2.0.14  | major        | v3.0.0   |
-| v2.0.14  | 2.1.5        | v2.1.5   |
+| 当前版本 | 升级类型     | 新版本  |
+| -------- | ------------ | ------- |
+| v2.0.14  | patch (默认) | v2.0.15 |
+| v2.0.14  | minor        | v2.1.0  |
+| v2.0.14  | major        | v3.0.0  |
+| v2.0.14  | 2.1.5        | v2.1.5  |
 
 ### 3. 更新版本文件
 
@@ -68,9 +69,11 @@ echo "v{新版本号}" > VERSION
 
 ```markdown
 # 替换前
+
 ## [Unreleased]
 
 # 替换后
+
 ## [v{新版本号}] - YYYY-MM-DD
 ```
 
@@ -210,12 +213,12 @@ git push origin v{新版本号}
 
 当推送 `v*` 格式的 tag 时，会自动触发以下 workflow：
 
-| Workflow | Runner | 产物 |
-|----------|--------|------|
-| `release-linux.yml` | ubuntu-latest | `claude-proxy-linux-amd64`, `claude-proxy-linux-arm64` |
-| `release-macos.yml` | macos-latest | `claude-proxy-darwin-amd64`, `claude-proxy-darwin-arm64` |
+| Workflow              | Runner         | 产物                                                               |
+| --------------------- | -------------- | ------------------------------------------------------------------ |
+| `release-linux.yml`   | ubuntu-latest  | `claude-proxy-linux-amd64`, `claude-proxy-linux-arm64`             |
+| `release-macos.yml`   | macos-latest   | `claude-proxy-darwin-amd64`, `claude-proxy-darwin-arm64`           |
 | `release-windows.yml` | windows-latest | `claude-proxy-windows-amd64.exe`, `claude-proxy-windows-arm64.exe` |
-| `docker-build.yml` | ubuntu-latest | Docker 镜像 (阿里云容器镜像服务, linux/amd64 + linux/arm64) |
+| `docker-build.yml`    | ubuntu-latest  | Docker 镜像 (阿里云容器镜像服务, linux/amd64 + linux/arm64)        |
 
 ### Concurrency 配置
 

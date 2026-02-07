@@ -4,6 +4,470 @@
 
 ---
 
+## [v2.5.13] - 2026-01-31
+
+### 修复
+
+- **Gemini functionDeclaration parameters 类型修复** - 修复 Gemini API 返回 400 错误的问题
+  - 问题：当 Claude 工具的 `InputSchema` 为 nil、缺少 `type` 字段或缺少 `properties` 字段时，Gemini API 拒绝请求
+  - 新增 `normalizeGeminiParameters()` 辅助函数，确保 parameters schema 符合 Gemini 要求：
+    - `parameters` 必须有 `type: "object"` 字段
+    - `parameters` 必须有 `properties` 字段（即使为空对象）
+  - 涉及文件：`backend-go/internal/providers/gemini.go`
+
+---
+
+## [v2.5.12] - 2026-01-30
+
+### 新增
+
+- **渠道置顶/置底功能** - 在渠道编排菜单中新增一键调整渠道位置的操作
+  - 在渠道右侧弹出菜单中添加"置顶"和"置底"选项
+  - 第一个渠道不显示"置顶"，最后一个渠道不显示"置底"
+  - 操作后立即保存到后端，复用现有 `saveOrder()` 函数
+  - 解决渠道数量较多时拖拽排序不便的问题
+  - 涉及文件：
+    - `frontend/src/components/ChannelOrchestration.vue` - 添加菜单项和处理函数
+    - `frontend/src/plugins/vuetify.ts` - 添加 `arrow-collapse-up/down` 图标
+
+- **隐式缓存读取推断** - 当上游未明确返回 `cache_read_input_tokens` 但存在显著 token 差异时，自动推断缓存命中
+  - 检测 `message_start` 与 `message_delta` 事件中 `input_tokens` 的差异
+  - 触发条件：差额 > 10% 或差额 > 10000 tokens
+  - 将差额自动填充到 `CacheReadInputTokens` 字段，使 token 统计更准确
+  - **下游转发支持**：推断的 `cache_read_input_tokens` 会写入 `message_delta` 事件并转发给下游客户端
+  - 新增 `StreamContext.MessageStartInputTokens` 字段记录初始 token 数
+  - 新增 `inferImplicitCacheRead()` 函数在流结束时执行推断
+  - 新增 `PatchTokensInEventWithCache()` 函数在修补 token 的同时写入推断的缓存值
+  - **关键修复**：
+    - `message_start` 的 `input_tokens` 不再累积到 `CollectedUsage.InputTokens`，确保差额计算正确
+    - 使用 `originalUsageData` 传递给 `PatchMessageStartInputTokensIfNeeded`，避免误判
+    - Token 修补逻辑增加隐式缓存信号检测，避免覆盖缓存命中场景下的正确低值
+    - 隐式缓存推断在转发前执行，确保下游客户端能收到推断值
+    - 仅当上游事件中不存在 `cache_read_input_tokens` 字段时才写入推断值，避免覆盖上游显式返回的 0 值
+  - 涉及文件：
+    - `backend-go/internal/handlers/common/stream.go` - 核心逻辑实现
+    - `backend-go/internal/handlers/common/stream_test.go` - 单元测试（15 个边界场景）
+
+---
+
+## [v2.5.10] - 2026-01-26
+
+### 新增
+
+- **删除渠道时自动清理指标数据** - 修复删除渠道后内存和 SQLite 指标数据残留问题
+  - 扩展 `PersistenceStore` 接口，新增按 `metrics_key` 和 `api_type` 批量删除记录的方法
+  - 新增 `MetricsManager.DeleteChannelMetrics()` 方法，支持同时清理内存和持久化数据
+  - 新增 `ChannelScheduler.DeleteChannelMetrics()` 统一删除入口
+  - 修改 `DeleteUpstream` Handler（Messages/Responses/Gemini），删除后自动调用指标清理
+  - SQLite 清理不依赖内存状态，确保即使内存中无数据也能正确清理持久化记录
+  - 删除渠道时同时清理历史 Key 的指标数据
+  - **按 `api_type` 过滤删除**：避免误删其他接口类型（messages/responses/gemini）的指标数据
+  - **分批删除**：每批 500 条，避免触发 SQLite 变量上限（999）导致删除失败
+  - **并发安全**：`flushMu` 互斥锁串行化 flush 与 delete；`asyncFlushWg` 确保 Close 前所有异步 flush 完成
+  - 涉及文件：
+    - `backend-go/internal/metrics/persistence.go` - 接口扩展（新增 apiType 参数）
+    - `backend-go/internal/metrics/sqlite_store.go` - 实现 SQLite 删除逻辑（分批 + api_type 过滤）
+    - `backend-go/internal/metrics/channel_metrics.go` - 新增删除方法，导出 `GenerateMetricsKey()`
+    - `backend-go/internal/scheduler/channel_scheduler.go` - 新增统一删除入口
+    - `backend-go/internal/handlers/*/channels.go` - 删除 Handler 改造
+    - `backend-go/main.go` - 路由注册更新
+
+- **换 Key 后历史数据累计统计** - 修复更换 API Key 后旧 Key 的历史统计数据丢失问题
+  - 新增 `UpstreamConfig.HistoricalAPIKeys` 字段，存储历史 API Key 列表
+  - 更新渠道时自动维护历史 Key 列表：被移除的 Key 进入历史列表，恢复的 Key 从历史列表移除
+  - `Add*APIKey` / `Remove*APIKey` 接口同样维护历史 Key 列表
+  - `ToResponseMultiURL()` 支持聚合历史 Key 指标（只计入总数，不影响实时失败率和熔断判断）
+  - 前端查看渠道统计时，总数包含历史 Key 数据，Key 详情列表只显示当前活跃 Key
+  - 涉及文件：
+    - `backend-go/internal/config/config.go` - 新增 `HistoricalAPIKeys` 字段
+    - `backend-go/internal/config/config_utils.go` - `Clone()` 方法深拷贝历史 Key
+    - `backend-go/internal/config/config_*.go` - 更新渠道时维护历史 Key 列表
+    - `backend-go/internal/metrics/channel_metrics.go` - 聚合逻辑支持历史 Key
+    - `backend-go/internal/handlers/channel_metrics_handler.go` - 传入历史 Key 参数
+    - `backend-go/internal/handlers/gemini/dashboard.go` - 传入历史 Key 参数
+
+---
+
+## [v2.5.9] - 2026-01-24
+
+### 新增
+
+- **前端模型映射智能选择功能** - 优化模型重定向配置体验，支持自动获取上游模型列表
+  - 前端直连上游 `/v1/models` 接口，无需后端代理
+  - 目标模型输入框改为 `v-combobox`，点击时自动获取模型列表
+  - 为每个 API Key 并行检测 models 接口状态，提高效率
+  - 在 API 密钥列表中实时显示状态标签：
+    - 成功：绿色标签显示 `models 200 (N 个)`
+    - 失败：红色标签显示 `models 错误码`，鼠标悬停显示详细错误消息
+    - 加载中：蓝色标签显示 `检测中...`
+  - 智能错误解析，支持上游标准错误格式 `{ "error": { "message": "...", "code": "..." } }`
+  - 合并所有成功的模型列表并去重，提供完整的模型选项
+  - 涉及文件：
+    - `frontend/src/services/api.ts` - 新增 `fetchUpstreamModels` 函数和 `buildModelsURL` 工具函数
+    - `frontend/src/components/AddChannelModal.vue` - 优化交互体验和状态管理
+
+---
+
+## [v2.5.8] - 2026-01-21
+
+### 修复
+
+- **客户端取消请求误计入失败** - 修复用户主动取消请求被错误计入渠道失败指标的问题
+  - 新增 `isClientSideError` 函数，使用 `errors.Is` 正确识别被包装的 `context.Canceled` 错误
+  - 仅识别明确的客户端取消（`context.Canceled`），连接故障（`broken pipe`、`connection reset`）继续 failover
+  - 统一口径：`SendRequest` 和 `handleSuccess` 路径均应用客户端取消判断
+  - 新增 `RecordRequestFinalizeClientCancel` 方法，客户端取消时仅计入总请求数，不计入失败数和失败率
+  - 客户端取消不重置 `ConsecutiveFailures`，保留真实的连续失败计数
+  - 涉及文件：
+    - `backend-go/internal/handlers/common/upstream_failover.go` - 错误类型判断与分流
+    - `backend-go/internal/metrics/channel_metrics.go` - 新增客户端取消记录方法
+    - `backend-go/internal/handlers/common/client_error_test.go` - 单元测试
+
+- **指标二次计数 Bug** - 修复 `RecordRequestFinalize*` fallback 路径导致的请求计数重复问题
+  - 将 `RequestCount++` 从 `RecordRequestConnected` 移至 `RecordRequestFinalize*` 阶段
+  - 采用延迟计数策略：连接时预写历史记录，完成时统一计数
+  - 确保 fallback 路径（requestID 丢失/索引越界）不会触发二次计数
+  - 涉及文件：`backend-go/internal/metrics/channel_metrics.go`
+
+### 重构
+
+- **指标记录架构优化** - 将指标记录职责从 handler 层下沉到 failover 层，实现"连接即计数"的实时统计
+  - 新增 `RecordRequestConnected` / `RecordRequestFinalizeSuccess` / `RecordRequestFinalizeFailure` 三阶段记录机制
+  - TCP 建连时即计入活跃请求数，响应完成后回写成功/失败与 token 数据
+  - 移除 handler 层的 `RecordSuccessWithUsage` / `RecordFailure` 调用，统一由 `upstream_failover.go` 管理
+  - 修改 `HandleSuccessFunc` 签名：返回 `(*types.Usage, error)` 而非 `*types.Usage`，支持流式响应错误处理
+  - 修改 `ProcessStreamEvents` / `HandleStreamResponse` 返回 usage，避免在 stream 层直接记录指标
+  - 新增 `pendingHistoryIdx` 映射表，支持请求 ID 到历史记录索引的快速查找
+  - 新增 `cleanupHistoryLocked` 函数，清理过期历史记录时同步修正索引
+  - 涉及文件：
+    - `backend-go/internal/handlers/common/stream.go` - 移除指标记录，返回 usage
+    - `backend-go/internal/handlers/common/upstream_failover.go` - 三阶段指标记录
+    - `backend-go/internal/handlers/messages/handler.go` - 移除指标记录调用
+    - `backend-go/internal/handlers/responses/handler.go` - 移除指标记录调用
+    - `backend-go/internal/handlers/gemini/handler.go` - 移除指标记录调用
+    - `backend-go/internal/metrics/channel_metrics.go` - 新增三阶段记录 API
+
+## [v2.5.6] - 2026-01-20
+
+### 修复
+
+- **Gemini CLI 工具调用签名兼容** - 修复多轮工具调用中签名字段位置/命名不一致导致上游返回 400 的问题（启用 `injectDummyThoughtSignature` 时会为缺失签名的 `functionCall` 注入 dummy）。
+- **Gemini CLI tools schema 兼容** - 支持 `parametersJsonSchema` 并在转发前清洗不兼容字段（`$schema` / `additionalProperties` / `const`），避免上游 400。
+- **Gemini Dashboard stripThoughtSignature 字段缺失** - Dashboard API 补齐 `stripThoughtSignature` 字段，避免配置在刷新后丢失。
+
+- **Gemini 渠道 stripThoughtSignature 字段无法保存** - 修复前端无法正确显示和保存"移除 Thought Signature"配置的问题
+  - 修复 `GetUpstreams` 函数返回数据中缺失 `stripThoughtSignature` 字段
+  - 修复前端图标显示问题（将 `mdi-signature-freehand` 改为 `mdi-close-circle`）
+  - 统一图标和开关颜色为 `error` 红色，与"移除"操作语义一致
+  - 涉及文件：
+    - `backend-go/internal/handlers/gemini/channels.go` - 添加缺失字段
+    - `frontend/src/components/AddChannelModal.vue` - 修复图标和颜色
+
+### 新增
+
+- **Gemini API thought_signature 兼容性方案** - 新增 `stripThoughtSignature` 配置项，支持兼容旧版 Gemini API
+  - 新增 `StripThoughtSignature` 配置字段（布尔值），用于移除 `thought_signature` 字段
+  - 实现 `stripThoughtSignatures()` 函数，移除所有 functionCall 的 thought_signature 字段
+  - 配置优先级：`StripThoughtSignature` > `InjectDummyThoughtSignature`
+  - 保持深拷贝机制，避免多渠道 failover 时污染后续请求
+  - 前端添加"移除 Thought Signature"开关（仅 Gemini 渠道显示）
+  - 涉及文件：
+    - `backend-go/internal/config/config.go` - 配置结构定义
+    - `backend-go/internal/config/config_gemini.go` - 配置更新逻辑
+    - `backend-go/internal/handlers/gemini/handler.go` - 请求处理逻辑
+    - `backend-go/internal/handlers/gemini/handler_test.go` - 单元测试
+    - `frontend/src/components/AddChannelModal.vue` - 前端开关
+    - `frontend/src/services/api.ts` - 类型定义
+
+## [v2.5.5] - 2026-01-19
+
+## [v2.5.4] - 2026-01-19
+
+### 重构
+
+- **Failover 逻辑模块化** - 将多渠道和单上游 failover 逻辑提取到公共模块，大幅减少代码重复
+  - 新增 `backend-go/internal/handlers/common/multi_channel_failover.go` - 多渠道 failover 外壳逻辑
+  - 新增 `backend-go/internal/handlers/common/upstream_failover.go` - 单上游 Key/BaseURL 轮转逻辑
+  - 重构 Messages、Responses、Gemini 三个 handler，使用统一的 failover 函数
+  - 代码行数减少：-1253 行，+475 行（净减少 778 行）
+  - 涉及文件：
+    - `backend-go/internal/handlers/messages/handler.go`
+    - `backend-go/internal/handlers/responses/handler.go`
+    - `backend-go/internal/handlers/gemini/handler.go`
+    - `backend-go/internal/scheduler/channel_scheduler.go`
+
+## [v2.5.3] - 2026-01-19
+
+### 修复
+
+- **Models API 日志标签修正** - 修正 Models API 相关日志标签，确保正确区分 Messages 和 Responses 渠道
+  - 修正 `models.go` 中 `tryModelsRequest` 和 `fetchModelsFromChannel` 函数的日志标签
+  - 使用动态 `channelType` 变量替代硬编码的 `"Messages"` 字符串
+  - 日志标签格式统一为 `[Messages-Models]` 或 `[Responses-Models]`
+  - 涉及文件：`backend-go/internal/handlers/messages/models.go`
+- **多渠道 failover 客户端取消检测** - 在 failover 循环中添加客户端断开检测，避免客户端已取消请求后继续尝试其他渠道
+  - 在每次渠道选择前检查 `c.Request.Context().Done()`
+  - 客户端断开时立即返回，不再进行无效的渠道 failover
+  - 涉及文件：
+    - `backend-go/internal/handlers/gemini/handler.go` - Gemini API 处理器
+    - `backend-go/internal/handlers/messages/handler.go` - Messages API 处理器
+    - `backend-go/internal/handlers/responses/handler.go` - Responses API 处理器
+
+### 新增
+
+- **响应 model 字段改写可配置化** - 新增环境变量 `REWRITE_RESPONSE_MODEL` 控制是否改写响应中的 model 字段
+  - 默认值：`false`（保持上游返回的原始 model）
+  - 启用后：当上游返回的 model 与请求的 model 不一致时，自动改写为请求的 model
+  - 适用范围：仅影响 Messages API 的流式响应，不影响 Responses API 和 Gemini API
+  - 涉及文件：
+    - `backend-go/.env.example` - 添加配置说明和默认值
+    - `backend-go/internal/config/env.go` - 添加 `RewriteResponseModel` 配置字段
+    - `backend-go/internal/handlers/common/stream.go` - 修改 `PatchMessageStartEvent` 函数，仅在配置启用时改写 model 字段
+
+## [v2.5.2] - 2026-01-19
+
+### 新增
+
+- **Gemini thought_signature 可配置化** - 新增渠道级配置开关 `injectDummyThoughtSignature`
+  - 新增 `ensureThoughtSignatures` 函数：为所有缺失 `thought_signature` 的 `functionCall` 注入 dummy 值
+  - 使用官方推荐的 `skip_thought_signature_validator` 跳过验证
+  - **默认关闭**：保持原样，符合官方 Gemini API 标准
+  - **用户可开启**：为需要该字段的第三方 API 注入 dummy signature
+  - 前端 UI：在 Gemini 渠道编辑界面添加"注入 Dummy Thought Signature"开关
+  - 涉及文件：
+    - `backend-go/internal/config/config.go` - 添加 `InjectDummyThoughtSignature` 配置字段
+    - `backend-go/internal/config/config_gemini.go` - 更新方法支持新字段
+    - `backend-go/internal/config/config_messages.go` - 更新方法支持新字段
+    - `backend-go/internal/handlers/gemini/handler.go` - 根据配置决定是否调用 `ensureThoughtSignatures`
+    - `backend-go/internal/types/gemini.go` - 新增共享常量 `DummyThoughtSignature`
+    - `backend-go/internal/converters/gemini_converter.go` - 使用共享常量
+    - `frontend/src/services/api.ts` - 添加类型定义
+    - `frontend/src/components/AddChannelModal.vue` - 添加配置开关 UI
+    - `frontend/src/plugins/vuetify.ts` - 添加 `mdi-signature` 图标映射
+  - 配置优化：将 `.ccb_config/` 目录加入 `.gitignore`，避免泄露本机路径等敏感信息
+
+- **codex-review 技能 v2.1.0** - 新增自动暂存新增文件功能，避免 codex 审核时报 P1 错误
+  - 新增步骤 2：在审核前自动暂存所有新增文件
+  - 使用安全的 `git ls-files -z | while read` 命令，正确处理特殊文件名（空格、换行、以 `-` 开头）
+  - 修复空列表问题：当没有新增文件时安全跳过，不会报错
+  - 优化元数据：添加 `user-invocable: true` 和 `context: fork` 字段
+  - 优化描述：添加触发关键词，移除 `(user)` 后缀
+  - 更新完整审核协议：增加 `[PREPARE] Stage Untracked Files` 步骤
+  - 创建 Plugin Marketplace 配置：`.claude-plugin/marketplace.json`
+  - 创建详细文档：`.claude/skills/codex-review/README.md`
+  - 涉及文件：`.claude/skills/codex-review/SKILL.md`, `.claude-plugin/marketplace.json`, `.claude/skills/codex-review/README.md`
+
+### 优化
+
+- **渠道活跃度图表颜色优化** - 状态条柱状图颜色改为显示每个 6 秒段的独立成功率
+  - 修改 SVG 渐变定义：为每个柱子单独定义渐变色（`gradient-${channelIndex}-${i}`）
+  - 重构 `getActivityBars` 函数：为每个 6 秒时间段计算独立的成功率并分配颜色
+  - 颜色规则（7 档分级）：
+    - 深红色（0-5%）：极端故障
+    - 红色（5-20%）：严重失败
+    - 深橙色（20-40%）：高失败率
+    - 橙色（40-60%）：中等失败率
+    - 黄色（60-80%）：轻微失败
+    - 黄绿色（80-95%）：良好
+    - 绿色（95-100%）：优秀
+  - 效果：用户可以更清晰地看到每个时间段的健康状况，颜色变化更细腻
+  - 性能优化：新增 `activityBarsCache` 计算属性缓存柱状图数据，避免重复计算
+  - 代码清理：删除未使用的 `activityColorCache` 和 `getActivityColor` 函数
+  - 涉及文件：`frontend/src/components/ChannelOrchestration.vue`
+
+- **修复 Dashboard 切换 Tab 时数据闪烁问题** - 将 Dashboard 数据改为按 API 类型独立缓存
+  - 重构 `channelStore`：将单一全局 `dashboardMetrics`/`dashboardStats`/`dashboardRecentActivity` 改为按 Tab（messages/responses/gemini）独立缓存的 `dashboardCache` 结构
+  - 新增 `currentDashboardMetrics`、`currentDashboardStats`、`currentDashboardRecentActivity` 计算属性，根据当前 Tab 返回对应缓存数据
+  - 切换 Tab 时直接显示该 Tab 的缓存数据，避免显示其他 Tab 的旧数据导致闪烁
+  - 涉及文件：`frontend/src/stores/channel.ts`、`frontend/src/views/ChannelsView.vue`
+
+### 重构
+
+- **前端系统状态管理重构** - 将 App.vue 中的系统级状态迁移到 SystemStore
+  - 新增 `src/stores/system.ts` 系统状态 Store，统一管理系统运行状态、版本信息、Fuzzy 模式加载状态
+  - 重构 `src/App.vue`，移除本地系统状态变量（systemStatus、versionInfo、isCheckingVersion、fuzzyModeLoading、fuzzyModeLoadError），改用 SystemStore 统一管理
+  - 更新 `src/stores/index.ts`，导出 SystemStore
+  - 新增 2 个计算属性：systemStatusText、systemStatusDesc
+  - 新增 8 个状态管理方法：setSystemStatus、setVersionInfo、setCurrentVersion、setCheckingVersion、setFuzzyModeLoading、setFuzzyModeLoadError、resetSystemState
+  - 优势：
+    - 状态集中：所有系统级状态统一管理，避免分散在组件中
+    - 代码简化：App.vue 系统状态逻辑更清晰，减少本地状态管理
+    - 可复用性：其他组件可直接使用 SystemStore 的系统状态
+    - 易维护：系统状态变更集中在 Store 中，便于调试和扩展
+  - 涉及文件：`frontend/src/stores/system.ts`、`frontend/src/stores/index.ts`、`frontend/src/App.vue`
+
+- **前端对话框状态管理重构** - 将 App.vue 中的对话框状态迁移到 DialogStore
+  - 新增 `src/stores/dialog.ts` 对话框状态 Store，统一管理添加/编辑渠道对话框和添加 API 密钥对话框
+  - 重构 `src/App.vue`，移除本地对话框状态变量（showAddChannelModal、showAddKeyModalRef、editingChannel、selectedChannelForKey、newApiKey），改用 DialogStore 统一管理
+  - 更新 `src/stores/index.ts`，导出 DialogStore
+  - 新增 6 个状态管理方法：openAddChannelModal、openEditChannelModal、closeAddChannelModal、openAddKeyModal、closeAddKeyModal、resetDialogState
+  - 优势：
+    - 状态集中：所有对话框相关状态统一管理，避免分散在组件中
+    - 代码简化：App.vue 对话框逻辑更清晰，减少本地状态管理
+    - 可复用性：其他组件可直接使用 DialogStore 的对话框状态
+    - 易维护：对话框状态变更集中在 Store 中，便于调试和扩展
+  - 涉及文件：`frontend/src/stores/dialog.ts`、`frontend/src/stores/index.ts`、`frontend/src/App.vue`
+
+- **前端偏好设置管理重构** - 将 App.vue 中的用户偏好设置迁移到 PreferencesStore
+  - 新增 `src/stores/preferences.ts` 偏好设置 Store，统一管理暗色模式、Fuzzy 模式、全局统计面板状态
+  - 重构 `src/App.vue`，移除本地偏好设置变量（darkModePreference、fuzzyModeEnabled、showGlobalStats），改用 PreferencesStore 统一管理
+  - 更新 `src/stores/index.ts`，导出 PreferencesStore
+  - 支持自动持久化到 localStorage（使用 pinia-plugin-persistedstate）
+  - 优势：
+    - 状态集中：所有用户偏好设置统一管理，避免分散在组件中
+    - 自动持久化：用户设置自动保存到本地存储，刷新页面后保持
+    - 代码简化：App.vue 偏好设置逻辑更清晰，减少本地状态管理
+    - 可复用性：其他组件可直接使用 PreferencesStore 的偏好设置
+  - 涉及文件：`frontend/src/stores/preferences.ts`、`frontend/src/stores/index.ts`、`frontend/src/App.vue`
+
+- **前端认证状态管理重构** - 将 App.vue 中的认证相关状态迁移到 AuthStore
+  - 扩展 `src/stores/auth.ts`，新增认证 UI 状态管理（authError、authAttempts、authLockoutTime、isAutoAuthenticating、isInitialized、authLoading、authKeyInput）
+  - 重构 `src/App.vue`，移除本地认证状态变量，改用 AuthStore 统一管理
+  - 新增 `isAuthLocked` 计算属性，自动判断认证锁定状态
+  - 新增 8 个状态管理方法：setAuthError、incrementAuthAttempts、resetAuthAttempts、setAuthLockout、setAutoAuthenticating、setInitialized、setAuthLoading、setAuthKeyInput
+  - 优势：
+    - 状态集中：所有认证相关状态统一管理，避免分散在组件中
+    - 代码简化：App.vue 认证逻辑更清晰，减少本地状态管理
+    - 可复用性：其他组件可直接使用 AuthStore 的认证状态
+    - 安全性增强：认证失败次数和锁定时间集中管理，便于扩展
+  - 涉及文件：`frontend/src/stores/auth.ts`、`frontend/src/App.vue`
+
+- **前端渠道管理逻辑重构** - 将 App.vue 中的渠道管理逻辑提取到 Pinia Store
+  - 新增 `src/stores/channel.ts` 渠道状态 Store，统一管理三种 API 类型（Messages/Responses/Gemini）的渠道数据
+  - 重构 `src/App.vue`，移除 300+ 行本地状态和业务逻辑，改用 ChannelStore 统一管理
+  - 更新 `src/stores/index.ts`，导出 ChannelStore
+  - 优势：
+    - 代码解耦：App.vue 从 1000+ 行减少到 700+ 行，职责更清晰
+    - 状态集中：渠道数据、指标、自动刷新定时器统一管理
+    - 可复用性：其他组件可直接使用 ChannelStore，无需通过 props 传递
+    - 可测试性：业务逻辑独立于组件，便于单元测试
+  - 涉及文件：`frontend/src/stores/channel.ts`、`frontend/src/stores/index.ts`、`frontend/src/App.vue`
+
+- **前端状态管理架构升级** - 引入 Pinia 状态管理库，替代原有的本地状态管理
+  - 新增 `pinia` 和 `pinia-plugin-persistedstate` 依赖，实现响应式状态管理和自动持久化
+  - 新增 `src/stores/auth.ts` 认证状态 Store，统一管理 API Key 和认证状态
+  - 重构 `src/services/api.ts`，从 AuthStore 获取 API Key，移除本地状态管理逻辑
+  - 重构 `src/App.vue`，使用 AuthStore 替代 `isAuthenticated` 本地状态，简化认证流程
+  - 更新 `src/main.ts`，初始化 Pinia 和持久化插件
+  - 配置 `tsconfig.json` 路径别名 `@/*`，支持模块化导入
+  - 优势：响应式状态管理、自动持久化、更好的类型推断、代码解耦
+  - 涉及文件：`frontend/package.json`、`frontend/src/stores/auth.ts`、`frontend/src/services/api.ts`、`frontend/src/App.vue`、`frontend/src/main.ts`、`frontend/tsconfig.json`
+
+---
+
+## [v2.4.34] - 2026-01-17
+
+### 新增
+
+- **会话管理增强** - 支持 Gemini API 的 `X-Gemini-Api-Privileged-User-Id` 请求头
+  - 在 `ExtractConversationID()` 函数中新增对该请求头的支持，用于会话亲和性管理
+  - 优先级顺序：Conversation_id > Session_id > X-Gemini-Api-Privileged-User-Id > prompt_cache_key > metadata.user_id
+  - 涉及文件：`backend-go/internal/handlers/common/request.go`
+
+### 优化
+
+- **Gemini Dashboard API 性能优化** - 将前端 3 个独立请求合并为 1 个后端统一接口
+  - 新增 `/api/gemini/channels/dashboard` 端点，一次性返回 channels、metrics、stats、recentActivity 数据
+  - 后端新增 `internal/handlers/gemini/dashboard.go` 处理器，减少网络往返次数
+  - 涉及文件：`backend-go/main.go`、`backend-go/internal/handlers/gemini/dashboard.go`
+
+### 重构
+
+- **前端 UI 框架统一** - 移除 Tailwind CSS 和 DaisyUI，完全使用 Vuetify
+  - 从 package.json 移除 tailwindcss、daisyui、autoprefixer、postcss 依赖
+  - 删除 tailwind.config.js 和 postcss.config.js 配置文件
+  - 更新 src/assets/style.css，移除 @tailwind 指令，保留自定义样式
+  - 优势：消除多框架样式冲突、减少打包体积、统一设计语言（Material Design）
+  - 涉及文件：`frontend/package.json`、`frontend/src/assets/style.css`、`frontend/src/main.ts`
+
+---
+
+## [v2.4.33] - 2026-01-17
+
+### 新增
+
+- **渠道实时活跃度可视化** - 在渠道列表中显示最近 15 分钟的活跃度数据
+  - 后端新增 `GetRecentActivityMultiURL()` 方法，按 **6 秒粒度**分段统计请求量、成功/失败数、Token 消耗（共 150 段）
+  - **支持多 URL 和多 Key 聚合**：自动聚合渠道所有故障转移 URL 和所有活跃 API Key 的数据，提供完整的渠道活跃度视图
+  - Dashboard API 返回 `recentActivity` 字段，包含每个渠道的 150 段活跃度数据
+  - 前端渠道行显示 RPM/TPM 指标，**背景波形柱状图**实时反映活跃度变化（整体颜色根据全局失败率着色：绿色=成功率≥80%，橙色=成功率≥50%，红色=成功率<50%）
+  - 柱状图每 2 秒自动更新，用户调用 API 后立即看到柱子"跳动"，提供直观的脉冲式活跃度展示
+  - 涉及文件：`backend-go/internal/metrics/channel_metrics.go`、`backend-go/internal/handlers/channel_metrics_handler.go`、`frontend/src/components/ChannelOrchestration.vue`、`frontend/src/services/api.ts`、`frontend/src/App.vue`
+
+---
+
+## [v2.4.32] - 2026-01-14
+
+### ✨ 新增
+
+- **Gemini 渠道支持 thinking 模式函数调用签名传递** - `GeminiFunctionCall` 结构体新增 `ThoughtSignature` 字段
+  - 用于 thinking 模式下的签名，需原样传回上游
+  - 涉及文件：`backend-go/internal/types/gemini.go`
+
+### 🔧 优化
+
+- **Gemini 渠道添加模态框增强** - 扩展服务类型和模型选项
+  - 服务类型新增 OpenAI 和 Claude 选项，支持更多上游协议
+  - 更新 Gemini 模型列表：新增 gemini-2、gemini-2.5-flash-lite、gemini-2.5-flash-image、TTS 预览模型、gemini-3 系列预览模型
+  - 涉及文件：`frontend/src/components/AddChannelModal.vue`
+
+### 🐛 修复
+
+- **修复快速输入解析器冒号分隔导致 URL 被截断的问题** - 增强 `extractTokens()` 函数支持冒号作为分隔符，同时保护 URL 完整性
+  - 新增 URL 占位符机制：先提取完整 URL 并替换为占位符，分割后再恢复
+  - 支持中文标点分隔符：逗号（，）、分号（；）、冒号（：）
+  - 涉及文件：`frontend/src/utils/quickInputParser.ts`
+
+---
+
+## [v2.4.31] - 2026-01-12
+
+### 🐛 修复
+
+- **修复流式工具调用输出稳定性和合并逻辑** - 增强 `stream_synthesizer.go` 的工具调用处理
+  - 工具调用输出按 index 排序，避免 map 遍历顺序不稳定导致日志顺序随机
+  - 修复 ID 生成错误：`string(rune(index))` 改为 `strconv.Itoa(index)`，避免非 ASCII 字符
+  - 合并逻辑增强：仅合并连续 index 的工具调用，防止误合并不相关调用
+  - 新增 ID 匹配检查：合并时验证两个 block 的 ID 一致（或其中一个为空）
+  - 支持 ID 补全：合并时若 curr 无 ID 但 next 有，自动补全
+  - 涉及文件：`backend-go/internal/utils/stream_synthesizer.go`
+
+---
+
+## [v2.4.30] - 2026-01-10
+
+### 🐛 修复
+
+- **修复流式响应工具调用分裂问题** - 当上游返回的工具调用被意外分成两个 content_block 时自动合并
+  - 问题场景：第一个 block 有 name 和 id 但参数为空 "{}"，第二个 block 没有 name 但有完整参数
+  - 新增 `mergeSplitToolCalls()` 方法检测并合并分裂的工具调用
+  - 在 `GetSynthesizedContent()` 中调用，确保日志输出正确的工具调用信息
+  - 涉及文件：`backend-go/internal/utils/stream_synthesizer.go`
+
+---
+
+## [v2.4.29] - 2026-01-10
+
+### 🐛 修复
+
+- **修复空 signature 字段导致 Claude API 400 错误** - 客户端可能发送带空 `signature` 字段（空字符串或 null）的请求，Claude API 会拒绝并返回 400 错误
+  - 新增 `RemoveEmptySignatures()` 函数，定向移除 `messages[*].content[*].signature` 路径下的空值
+  - 使用 `json.Decoder` 保留数字精度，`SetEscapeHTML(false)` 保持原始格式
+  - **注意**：当请求体被修改时，JSON 字段顺序可能发生变化（不影响 API 语义）
+  - 在 Messages Handler 入口处调用预处理，确保请求发送前清理无效字段
+  - 涉及文件：`backend-go/internal/handlers/common/request.go`、`backend-go/internal/handlers/messages/handler.go`
+
+### ✨ 改进
+
+- **增强 Trace 亲和性日志记录** - 在关键操作点添加详细日志，方便排查亲和性相关问题
+  - `[Affinity-Set]` 记录新建/变更用户亲和
+  - `[Affinity-Remove]` 记录手动移除用户亲和
+  - `[Affinity-RemoveByChannel]` 记录渠道移除时批量清理
+  - `[Affinity-Cleanup]` 记录定时清理过期记录
+  - 日志在锁外执行，避免高负载下的尾延迟
+  - 用户 ID 分级脱敏：短 ID 也保留部分字符便于关联
+  - 涉及文件：`backend-go/internal/session/trace_affinity.go`
+
 ## [v2.4.28] - 2026-01-07
 
 ### 🐛 修复

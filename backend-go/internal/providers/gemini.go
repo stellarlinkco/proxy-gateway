@@ -50,7 +50,7 @@ func (p *GeminiProvider) ConvertToProviderRequest(c *gin.Context, upstream *conf
 
 	url := fmt.Sprintf("%s/models/%s:%s", strings.TrimSuffix(upstream.GetEffectiveBaseURL(), "/"), model, action)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(reqBodyBytes))
+	req, err := http.NewRequestWithContext(c.Request.Context(), "POST", url, bytes.NewReader(reqBodyBytes))
 	if err != nil {
 		return nil, originalBodyBytes, fmt.Errorf("创建Gemini请求失败: %w", err)
 	}
@@ -213,11 +213,42 @@ func (p *GeminiProvider) convertTools(claudeTools []types.ClaudeTool) []map[stri
 		tools = append(tools, map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
-			"parameters":  cleanJsonSchema(tool.InputSchema),
+			"parameters":  normalizeGeminiParameters(cleanJsonSchema(tool.InputSchema)),
 		})
 	}
 
 	return tools
+}
+
+// normalizeGeminiParameters 确保参数 schema 符合 Gemini 要求
+// Gemini 要求 functionDeclaration.parameters 必须是 type: "object" 且有 properties 字段
+func normalizeGeminiParameters(schema interface{}) map[string]interface{} {
+	// 默认空 schema
+	defaultSchema := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+
+	if schema == nil {
+		return defaultSchema
+	}
+
+	schemaMap, ok := schema.(map[string]interface{})
+	if !ok {
+		return defaultSchema
+	}
+
+	// 确保有 type 字段且为 "object"
+	if _, hasType := schemaMap["type"]; !hasType {
+		schemaMap["type"] = "object"
+	}
+
+	// 确保有 properties 字段
+	if _, hasProps := schemaMap["properties"]; !hasProps {
+		schemaMap["properties"] = map[string]interface{}{}
+	}
+
+	return schemaMap
 }
 
 // ConvertToClaudeResponse 转换为 Claude 响应

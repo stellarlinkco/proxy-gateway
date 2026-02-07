@@ -1,4 +1,17 @@
 // API服务模块
+import { useAuthStore } from '@/stores/auth'
+
+export class ApiError extends Error {
+  readonly status: number
+  readonly details?: unknown
+
+  constructor(message: string, status: number, details?: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.details = details
+  }
+}
 
 // 从环境变量读取配置
 const getApiBase = () => {
@@ -79,7 +92,7 @@ export interface Channel {
   insecureSkipVerify?: boolean
   modelMapping?: Record<string, string>
   latency?: number
-  status?: ChannelStatus | 'healthy' | 'error' | 'unknown'
+  status?: ChannelStatus | 'healthy' | 'error' | 'unknown' | ''
   index: number
   pinned?: boolean
   // 多渠道调度相关字段
@@ -89,6 +102,8 @@ export interface Channel {
   promotionUntil?: string    // 促销期截止时间（ISO 格式）
   latencyTestTime?: number   // 延迟测试时间戳（用于 5 分钟后自动清除显示）
   lowQuality?: boolean       // 低质量渠道标记：启用后强制本地估算 token，偏差>5%时使用本地值
+  injectDummyThoughtSignature?: boolean  // Gemini 特定：为 functionCall 注入 dummy thought_signature（兼容第三方 API）
+  stripThoughtSignature?: boolean        // Gemini 特定：移除 thought_signature 字段（兼容旧版 Gemini API）
 }
 
 export interface ChannelsResponse {
@@ -111,6 +126,7 @@ export interface ChannelDashboardResponse {
     windowSize: number
     circuitRecoveryTime: string
   }
+  recentActivity?: ChannelRecentActivity[]  // 最近 15 分钟分段活跃度
 }
 
 export interface PingResult {
@@ -272,46 +288,136 @@ export interface LiveRequestsResponse {
   count: number
 }
 
-class ApiService {
-  private apiKey: string | null = null
+// ============== 渠道实时活跃度类型 ==============
 
-  // 设置API密钥
-  setApiKey(key: string | null) {
-    this.apiKey = key
+// 活跃度分段数据（每 6 秒一段）
+export interface ActivitySegment {
+  requestCount: number
+  successCount: number
+  failureCount: number
+  inputTokens: number
+  outputTokens: number
+}
+
+// 渠道最近活跃度数据
+export interface ChannelRecentActivity {
+  channelIndex: number
+  segments: ActivitySegment[]  // 150 段，每段 6 秒，从旧到新（共 15 分钟）
+  rpm: number                  // 15分钟平均 RPM
+  tpm: number                  // 15分钟平均 TPM
+}
+
+// ============== 上游模型列表类型 ==============
+
+export interface ModelEntry {
+  id: string
+  object: string
+  created: number
+  owned_by: string
+}
+
+export interface ModelsResponse {
+  object: string
+  data: ModelEntry[]
+}
+
+/**
+ * 构建上游的 /v1/models 端点 URL
+ * 参考：backend-go/internal/handlers/messages/models.go:240-257
+ */
+function buildModelsURL(baseURL: string): string {
+  // 处理 # 后缀（跳过版本前缀）
+  const skipVersionPrefix = baseURL.endsWith('#')
+  if (skipVersionPrefix) {
+    baseURL = baseURL.slice(0, -1)
+  }
+  baseURL = baseURL.replace(/\/$/, '')
+
+  // 检查是否已有版本后缀（如 /v1, /v2）
+  const versionPattern = /\/v\d+[a-z]*$/
+  const hasVersionSuffix = versionPattern.test(baseURL)
+
+  // 构建端点
+  let endpoint = '/models'
+  if (!hasVersionSuffix && !skipVersionPrefix) {
+    endpoint = '/v1' + endpoint
   }
 
-  // 获取当前API密钥
-  getApiKey(): string | null {
-    return this.apiKey
-  }
+  return baseURL + endpoint
+}
 
-  // 初始化密钥（从localStorage）
-  initializeAuth() {
-    // 从localStorage获取保存的密钥
-    const savedKey = localStorage.getItem('proxyAccessKey')
-    if (savedKey) {
-      this.setApiKey(savedKey)
-      return savedKey
+/**
+ * 直接从上游获取模型列表（前端直连）
+ */
+export async function fetchUpstreamModels(
+  baseUrl: string,
+  apiKey: string
+): Promise<ModelsResponse> {
+  const url = buildModelsURL(baseUrl)
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`
+    },
+    signal: AbortSignal.timeout(10000) // 10秒超时
+  })
+
+  if (!response.ok) {
+    let errorMessage = `${response.status} ${response.statusText}`
+    let errorDetails: unknown = null
+
+    try {
+      const errorText = await response.text()
+      if (errorText) {
+        const errorJson = JSON.parse(errorText)
+        // 解析上游错误格式: { "error": { "code": "", "message": "...", "type": "..." } }
+        if (errorJson.error && errorJson.error.message) {
+          errorMessage = errorJson.error.message
+          errorDetails = errorJson.error
+        } else if (errorJson.message) {
+          errorMessage = errorJson.message
+          errorDetails = errorJson
+        }
+      }
+    } catch {
+      // 解析失败,使用默认错误消息
     }
 
-    return null
+    throw new ApiError(errorMessage, response.status, errorDetails)
   }
 
-  // 清除认证信息
-  clearAuth() {
-    this.apiKey = null
-    localStorage.removeItem('proxyAccessKey')
+  return await response.json()
+}
+
+class ApiService {
+  // 获取当前 API Key（从 AuthStore）
+  private getApiKey(): string | null {
+    const authStore = useAuthStore()
+    return authStore.apiKey
   }
 
+  private async parseResponseBody(response: Response): Promise<unknown> {
+    const text = await response.text()
+    if (!text) return null
+    try {
+      return JSON.parse(text)
+    } catch {
+      return text
+    }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async request(url: string, options: RequestInit = {}): Promise<any> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       ...(options.headers as Record<string, string>)
     }
 
-    // 添加API密钥到请求头
-    if (this.apiKey) {
-      headers['x-api-key'] = this.apiKey
+    // 从 AuthStore 获取 API 密钥并添加到请求头
+    const apiKey = this.getApiKey()
+    if (apiKey) {
+      headers['x-api-key'] = apiKey
     }
 
     const response = await fetch(`${API_BASE}${url}`, {
@@ -320,20 +426,32 @@ class ApiService {
     })
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Unknown error' }))
+      const errorBody = await this.parseResponseBody(response)
+      const errorMessage =
+        (typeof errorBody === 'object' && errorBody && 'error' in errorBody && typeof (errorBody as { error?: unknown }).error === 'string'
+          ? (errorBody as { error: string }).error
+          : typeof errorBody === 'object' && errorBody && 'message' in errorBody && typeof (errorBody as { message?: unknown }).message === 'string'
+            ? (errorBody as { message: string }).message
+            : typeof errorBody === 'string'
+              ? errorBody
+              : null) || `Request failed (${response.status})`
 
-      // 如果是401错误，清除本地认证信息并提示用户重新登录
+      // 如果是401错误，清除认证信息并提示用户重新登录
       if (response.status === 401) {
-        this.clearAuth()
+        const authStore = useAuthStore()
+        authStore.clearAuth()
         // 记录认证失败(前端日志)
-        console.warn('🔒 认证失败 - 时间:', new Date().toISOString())
-        throw new Error('认证失败，请重新输入访问密钥')
+        if (import.meta.env.DEV) {
+          console.warn('🔒 认证失败 - 时间:', new Date().toISOString())
+        }
+        throw new ApiError('认证失败，请重新输入访问密钥', response.status, errorBody)
       }
 
-      throw new Error(error.error || error.message || 'Request failed')
+      throw new ApiError(errorMessage, response.status, errorBody)
     }
 
-    return response.json()
+    if (response.status === 204) return null
+    return this.parseResponseBody(response)
   }
 
   async getChannels(): Promise<ChannelsResponse> {
@@ -760,31 +878,9 @@ class ApiService {
     }))
   }
 
-  // Gemini Dashboard（降级实现：组合 channels + metrics 调用）
+  // Gemini Dashboard（使用后端统一接口）
   async getGeminiChannelDashboard(): Promise<ChannelDashboardResponse> {
-    const [channelsResp, metrics] = await Promise.all([
-      this.getGeminiChannels(),
-      this.getGeminiChannelMetrics()
-    ])
-
-    const activeCount = channelsResp.channels.filter(
-      ch => ch.status === 'active' || !ch.status
-    ).length
-
-    return {
-      channels: channelsResp.channels,
-      loadBalance: channelsResp.loadBalance,
-      metrics: metrics,
-      stats: {
-        multiChannelMode: activeCount > 1,
-        activeChannelCount: channelsResp.channels.filter(ch => ch.status !== 'disabled').length,
-        traceAffinityCount: 0,
-        traceAffinityTTL: '0s',
-        failureThreshold: 3,
-        windowSize: 100,
-        circuitRecoveryTime: '30s'
-      }
-    }
+    return this.request('/gemini/channels/dashboard')
   }
 }
 

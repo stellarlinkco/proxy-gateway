@@ -25,7 +25,7 @@ func GetChannelMetricsWithConfig(metricsManager *metrics.MetricsManager, cfgMana
 		result := make([]gin.H, 0, len(upstreams))
 		for i, upstream := range upstreams {
 			// 使用多 URL 聚合方法获取渠道指标（支持 failover 多端点场景）
-			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0)
+			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0, upstream.HistoricalAPIKeys)
 
 			item := gin.H{
 				"channelIndex":        i,
@@ -154,7 +154,7 @@ func GetResponsesChannelMetrics(metricsManager *metrics.MetricsManager) gin.Hand
 	return GetChannelMetrics(metricsManager)
 }
 
-// ResumeChannel 恢复熔断渠道（重置错误计数）
+// ResumeChannel 恢复熔断渠道（重置熔断状态，保留历史统计）
 // isResponses 参数指定是 Messages 渠道还是 Responses 渠道
 func ResumeChannel(sch *scheduler.ChannelScheduler, isResponses bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -165,12 +165,16 @@ func ResumeChannel(sch *scheduler.ChannelScheduler, isResponses bool) gin.Handle
 			return
 		}
 
-		// 重置渠道所有 Key 的指标
-		sch.ResetChannelMetrics(id, isResponses)
+		// 重置渠道所有 Key 的熔断状态（保留历史统计）
+		kind := scheduler.ChannelKindMessages
+		if isResponses {
+			kind = scheduler.ChannelKindResponses
+		}
+		sch.ResetChannelMetrics(id, kind)
 
 		c.JSON(200, gin.H{
 			"success": true,
-			"message": "渠道已恢复，错误计数已重置",
+			"message": "渠道已恢复，熔断状态已重置（历史统计保留）",
 		})
 	}
 }
@@ -180,6 +184,10 @@ func GetSchedulerStats(sch *scheduler.ChannelScheduler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 获取 isResponses 参数
 		isResponses := strings.ToLower(c.Query("type")) == "responses"
+		kind := scheduler.ChannelKindMessages
+		if isResponses {
+			kind = scheduler.ChannelKindResponses
+		}
 
 		// 根据类型选择对应的指标管理器
 		var metricsManager *metrics.MetricsManager
@@ -190,8 +198,8 @@ func GetSchedulerStats(sch *scheduler.ChannelScheduler) gin.HandlerFunc {
 		}
 
 		stats := gin.H{
-			"multiChannelMode":    sch.IsMultiChannelMode(isResponses),
-			"activeChannelCount":  sch.GetActiveChannelCount(isResponses),
+			"multiChannelMode":    sch.IsMultiChannelMode(kind),
+			"activeChannelCount":  sch.GetActiveChannelCount(kind),
 			"traceAffinityCount":  sch.GetTraceAffinityManager().Size(),
 			"traceAffinityTTL":    sch.GetTraceAffinityManager().GetTTL().String(),
 			"failureThreshold":    metricsManager.GetFailureThreshold() * 100,
@@ -359,13 +367,12 @@ func GetChannelMetricsHistory(metricsManager *metrics.MetricsManager, cfgManager
 		result := make([]MetricsHistoryResponse, 0, len(upstreams))
 		for i, upstream := range upstreams {
 			// 使用多 URL 聚合方法获取历史数据（支持 failover 多端点场景）
-			dataPoints, warning := metricsManager.GetHistoricalStatsMultiURLWithWarning(upstream.GetAllBaseURLs(), upstream.APIKeys, duration, interval)
+			dataPoints := metricsManager.GetHistoricalStatsMultiURL(upstream.GetAllBaseURLs(), upstream.APIKeys, duration, interval)
 
 			result = append(result, MetricsHistoryResponse{
 				ChannelIndex: i,
 				ChannelName:  upstream.Name,
 				DataPoints:   dataPoints,
-				Warning:      warning,
 			})
 		}
 
@@ -492,14 +499,10 @@ func GetChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, cfgMana
 			Keys:         make([]KeyMetricsHistoryResult, 0, len(displayKeys)),
 		}
 
-		var warning string
 		// 为筛选后的 Key 获取历史数据
 		for i, keyInfo := range displayKeys {
 			// 使用多 URL 聚合方法获取单个 Key 的历史数据（支持 failover 多端点场景）
-			dataPoints, w := metricsManager.GetKeyHistoricalStatsMultiURLWithWarning(upstream.GetAllBaseURLs(), keyInfo.APIKey, duration, interval)
-			if warning == "" {
-				warning = w
-			}
+			dataPoints := metricsManager.GetKeyHistoricalStatsMultiURL(upstream.GetAllBaseURLs(), keyInfo.APIKey, duration, interval)
 
 			// 获取 Key 的颜色
 			color := keyColors[i%len(keyColors)]
@@ -514,7 +517,6 @@ func GetChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, cfgMana
 			})
 		}
 
-		result.Warning = warning
 		c.JSON(200, result)
 	}
 }
@@ -534,6 +536,10 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 	return func(c *gin.Context) {
 		// 获取 type 参数，默认为 messages
 		isResponses := strings.ToLower(c.Query("type")) == "responses"
+		kind := scheduler.ChannelKindMessages
+		if isResponses {
+			kind = scheduler.ChannelKindResponses
+		}
 
 		cfg := cfgManager.GetConfig()
 		var upstreams []config.UpstreamConfig
@@ -578,7 +584,7 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 		// 2. 构建 metrics 数据
 		metricsResult := make([]gin.H, 0, len(upstreams))
 		for i, upstream := range upstreams {
-			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0)
+			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0, upstream.HistoricalAPIKeys)
 
 			item := gin.H{
 				"channelIndex":        i,
@@ -609,8 +615,8 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 
 		// 3. 构建 stats 数据
 		stats := gin.H{
-			"multiChannelMode":    sch.IsMultiChannelMode(isResponses),
-			"activeChannelCount":  sch.GetActiveChannelCount(isResponses),
+			"multiChannelMode":    sch.IsMultiChannelMode(kind),
+			"activeChannelCount":  sch.GetActiveChannelCount(kind),
 			"traceAffinityCount":  sch.GetTraceAffinityManager().Size(),
 			"traceAffinityTTL":    sch.GetTraceAffinityManager().GetTTL().String(),
 			"failureThreshold":    metricsManager.GetFailureThreshold() * 100,
@@ -618,12 +624,19 @@ func GetChannelDashboard(cfgManager *config.ConfigManager, sch *scheduler.Channe
 			"circuitRecoveryTime": metricsManager.GetCircuitRecoveryTime().String(),
 		}
 
+		// 4. 构建 recentActivity 数据（最近 15 分钟分段活跃度）
+		recentActivity := make([]*metrics.ChannelRecentActivity, len(upstreams))
+		for i, upstream := range upstreams {
+			recentActivity[i] = metricsManager.GetRecentActivityMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys)
+		}
+
 		// 返回合并数据
 		c.JSON(200, gin.H{
-			"channels":    channels,
-			"loadBalance": loadBalance,
-			"metrics":     metricsResult,
-			"stats":       stats,
+			"channels":       channels,
+			"loadBalance":    loadBalance,
+			"metrics":        metricsResult,
+			"stats":          stats,
+			"recentActivity": recentActivity,
 		})
 	}
 }
@@ -809,7 +822,7 @@ func GetGeminiChannelMetrics(metricsManager *metrics.MetricsManager, cfgManager 
 		result := make([]gin.H, 0, len(upstreams))
 		for i, upstream := range upstreams {
 			// 使用多 URL 聚合方法获取渠道指标（支持 failover 多端点场景）
-			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0)
+			resp := metricsManager.ToResponseMultiURL(i, upstream.GetAllBaseURLs(), upstream.APIKeys, 0, upstream.HistoricalAPIKeys)
 
 			item := gin.H{
 				"channelIndex":        i,

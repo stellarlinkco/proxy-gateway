@@ -24,21 +24,23 @@ func GetUpstreams(cfgManager *config.ConfigManager) gin.HandlerFunc {
 			priority := config.GetChannelPriority(&up, i)
 
 			upstreams[i] = gin.H{
-				"index":              i,
-				"name":               up.Name,
-				"serviceType":        up.ServiceType,
-				"baseUrl":            up.BaseURL,
-				"baseUrls":           up.BaseURLs,
-				"apiKeys":            up.APIKeys,
-				"description":        up.Description,
-				"website":            up.Website,
-				"insecureSkipVerify": up.InsecureSkipVerify,
-				"modelMapping":       up.ModelMapping,
-				"latency":            nil,
-				"status":             status,
-				"priority":           priority,
-				"promotionUntil":     up.PromotionUntil,
-				"lowQuality":         up.LowQuality,
+				"index":                       i,
+				"name":                        up.Name,
+				"serviceType":                 up.ServiceType,
+				"baseUrl":                     up.BaseURL,
+				"baseUrls":                    up.BaseURLs,
+				"apiKeys":                     up.APIKeys,
+				"description":                 up.Description,
+				"website":                     up.Website,
+				"insecureSkipVerify":          up.InsecureSkipVerify,
+				"modelMapping":                up.ModelMapping,
+				"latency":                     nil,
+				"status":                      status,
+				"priority":                    priority,
+				"promotionUntil":              up.PromotionUntil,
+				"lowQuality":                  up.LowQuality,
+				"injectDummyThoughtSignature": up.InjectDummyThoughtSignature,
+				"stripThoughtSignature":       up.StripThoughtSignature,
 			}
 		}
 
@@ -91,7 +93,7 @@ func UpdateUpstream(cfgManager *config.ConfigManager, sch *scheduler.ChannelSche
 
 		// 单 key 更换时重置熔断状态
 		if shouldResetMetrics {
-			sch.ResetGeminiChannelMetrics(id)
+			sch.ResetChannelMetrics(id, scheduler.ChannelKindGemini)
 		}
 
 		c.JSON(200, gin.H{"message": "Gemini upstream updated successfully"})
@@ -99,7 +101,7 @@ func UpdateUpstream(cfgManager *config.ConfigManager, sch *scheduler.ChannelSche
 }
 
 // DeleteUpstream 删除 Gemini 上游
-func DeleteUpstream(cfgManager *config.ConfigManager) gin.HandlerFunc {
+func DeleteUpstream(cfgManager *config.ConfigManager, sch *scheduler.ChannelScheduler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		idStr := c.Param("id")
 		id, err := strconv.Atoi(idStr)
@@ -108,10 +110,18 @@ func DeleteUpstream(cfgManager *config.ConfigManager) gin.HandlerFunc {
 			return
 		}
 
-		if _, err := cfgManager.RemoveGeminiUpstream(id); err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
+		removed, err := cfgManager.RemoveGeminiUpstream(id)
+		if err != nil {
+			if strings.Contains(err.Error(), "无效的") {
+				c.JSON(404, gin.H{"error": "Upstream not found"})
+			} else {
+				c.JSON(500, gin.H{"error": err.Error()})
+			}
 			return
 		}
+
+		// 删除成功后清理指标数据（使用 RemoveGeminiUpstream 返回的渠道信息）
+		sch.DeleteChannelMetrics(removed, scheduler.ChannelKindGemini)
 
 		c.JSON(200, gin.H{"message": "Gemini upstream deleted successfully"})
 	}
