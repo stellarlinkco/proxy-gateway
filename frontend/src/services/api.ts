@@ -390,6 +390,53 @@ export async function fetchUpstreamModels(
   return await response.json()
 }
 
+// ============== User Management Types ==============
+
+export interface UserResponse {
+  id: string
+  email: string
+  name: string
+  api_key: string  // masked or full (only on create)
+  role: string     // "admin" | "user"
+  status: string   // "active" | "disabled"
+  daily_limit_cents: number
+  monthly_limit_cents: number
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateUserRequest {
+  email: string
+  name: string
+  role?: string
+  daily_limit_cents?: number
+  monthly_limit_cents?: number
+}
+
+export interface UpdateUserRequest {
+  name?: string
+  role?: string
+  status?: string
+  daily_limit_cents?: number
+  monthly_limit_cents?: number
+  regenerate_api_key?: boolean
+}
+
+export interface UserChannel {
+  user_id: string
+  channel_type: string   // "messages" | "responses" | "gemini"
+  channel_index: number
+}
+
+export interface UserUsage {
+  user_id: string
+  date: string
+  request_count: number
+  input_tokens: number
+  output_tokens: number
+  cost_cents: number
+}
+
 class ApiService {
   // 获取当前 API Key（从 AuthStore）
   private getApiKey(): string | null {
@@ -452,6 +499,33 @@ class ApiService {
 
     if (response.status === 204) return null
     return this.parseResponseBody(response)
+  }
+
+  // 通用 HTTP 方法（供 Store 直接调用）
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async get(url: string): Promise<any> {
+    return this.request(url)
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async post(url: string, data?: unknown): Promise<any> {
+    return this.request(url, {
+      method: 'POST',
+      body: data != null ? JSON.stringify(data) : undefined
+    })
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async put(url: string, data?: unknown): Promise<any> {
+    return this.request(url, {
+      method: 'PUT',
+      body: data != null ? JSON.stringify(data) : undefined
+    })
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async del(url: string): Promise<any> {
+    return this.request(url, { method: 'DELETE' })
   }
 
   async getChannels(): Promise<ChannelsResponse> {
@@ -881,6 +955,61 @@ class ApiService {
   // Gemini Dashboard（使用后端统一接口）
   async getGeminiChannelDashboard(): Promise<ChannelDashboardResponse> {
     return this.request('/gemini/channels/dashboard')
+  }
+
+  // ============== User Management API ==============
+
+  async listUsers(): Promise<UserResponse[]> {
+    return this.request('/users')
+  }
+
+  async getUser(id: string): Promise<UserResponse> {
+    return this.request(`/users/${id}`)
+  }
+
+  async createUser(req: CreateUserRequest): Promise<UserResponse> {
+    return this.request('/users', {
+      method: 'POST',
+      body: JSON.stringify(req)
+    })
+  }
+
+  async updateUser(id: string, req: UpdateUserRequest): Promise<UserResponse> {
+    return this.request(`/users/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(req)
+    })
+  }
+
+  async deleteUser(id: string): Promise<void> {
+    await this.request(`/users/${id}`, {
+      method: 'DELETE'
+    })
+  }
+
+  async regenerateUserAPIKey(id: string): Promise<{ api_key: string }> {
+    return this.request(`/users/${id}/regenerate-key`, {
+      method: 'POST'
+    })
+  }
+
+  async getUserChannels(id: string): Promise<{ channels: UserChannel[] }> {
+    return this.request(`/users/${id}/channels`)
+  }
+
+  async setUserChannels(id: string, channels: UserChannel[]): Promise<void> {
+    await this.request(`/users/${id}/channels`, {
+      method: 'PUT',
+      body: JSON.stringify({ channels })
+    })
+  }
+
+  async getUserUsage(id: string): Promise<UserUsage[]> {
+    return this.request(`/users/${id}/usage`)
+  }
+
+  async getCurrentUser(): Promise<UserResponse> {
+    return this.request('/me')
   }
 }
 

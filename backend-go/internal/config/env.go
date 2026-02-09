@@ -42,6 +42,9 @@ type EnvConfig struct {
 	SweAgentBillingURL    string // swe-agent 计费服务 URL
 	PreAuthAmountCents    int64  // 预授权金额 (cents)
 	PricingUpdateInterval string // 价格表更新间隔
+	// Multi-user mode
+	MultiUserEnabled bool   // Whether multi-user mode is enabled
+	UserDBPath       string // Path to SQLite database for user storage
 }
 
 // NewEnvConfig 创建环境配置
@@ -89,6 +92,9 @@ func NewEnvConfig() *EnvConfig {
 		SweAgentBillingURL:    getEnv("SWE_AGENT_BILLING_URL", ""),
 		PreAuthAmountCents:    getEnvAsInt64("PRE_AUTH_AMOUNT_CENTS", 500), // 默认 $5.00
 		PricingUpdateInterval: getEnv("PRICING_UPDATE_INTERVAL", "24h"),
+		// Multi-user mode (default: enabled)
+		MultiUserEnabled: getEnv("MULTI_USER_ENABLED", "true") != "false",
+		UserDBPath:       getEnv("USER_DB_PATH", ".config/users.db"),
 	}
 }
 

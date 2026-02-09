@@ -178,7 +178,7 @@
     <v-main>
       <v-container fluid class="pa-4 pa-md-6">
         <RequestMonitorView v-if="isMonitorPage" v-model:apiType="channelStore.activeTab" />
-        <template v-else>
+        <template v-else-if="isChannelsPage">
         <!-- 全局统计顶部可折叠卡片（根据当前 Tab 显示对应统计） -->
         <v-card v-if="isAuthenticated" class="mb-4 global-stats-panel">
           <div
@@ -330,6 +330,8 @@
           </v-btn>
         </v-card>
         </template>
+        <!-- Non-channel routes (e.g., /users) -->
+        <router-view v-else />
       </v-container>
     </v-main>
 
@@ -388,6 +390,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useTheme } from 'vuetify'
+import { useRoute } from 'vue-router'
 import { api, fetchHealth, ApiError, type Channel } from './services/api'
 import { versionService } from './services/version'
 import { useAuthStore } from './stores/auth'
@@ -399,6 +402,10 @@ import AddChannelModal from './components/AddChannelModal.vue'
 import GlobalStatsChart from './components/GlobalStatsChart.vue'
 import { useAppTheme } from './composables/useTheme'
 import RequestMonitorView from './views/RequestMonitorView.vue'
+
+// Vue Router
+const route = useRoute()
+const isChannelsPage = computed(() => route.path.startsWith('/channels'))
 
 // Vuetify主题
 const theme = useTheme()

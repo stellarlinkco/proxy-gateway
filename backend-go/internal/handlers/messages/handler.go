@@ -11,7 +11,9 @@ import (
 
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
+	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
+	"github.com/BenedictKing/claude-proxy/internal/monitor"
 	"github.com/BenedictKing/claude-proxy/internal/providers"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/types"
@@ -21,7 +23,7 @@ import (
 
 // Handler Messages API 代理处理器
 // 支持多渠道调度：当配置多个渠道时自动启用
-func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channelScheduler *scheduler.ChannelScheduler) gin.HandlerFunc {
+func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channelScheduler *scheduler.ChannelScheduler, liveRequestManager *monitor.LiveRequestManager, sqliteStore *metrics.SQLiteStore) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		// 先进行认证
 		middleware.ProxyAuthMiddleware(envCfg)(c)
@@ -30,6 +32,12 @@ func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channel
 		}
 
 		startTime := time.Now()
+
+		// 初始化请求监控上下文
+		reqCtx := common.NewRequestMonitorContext("messages", liveRequestManager, sqliteStore)
+		reqCtx.UpdateLive()
+		defer reqCtx.EndLive()
+		defer reqCtx.Finalize(c)
 
 		// 读取请求体
 		bodyBytes, err := common.ReadRequestBody(c, envCfg.MaxRequestBodySize)
@@ -48,6 +56,11 @@ func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channel
 			_ = json.Unmarshal(bodyBytes, &claudeReq)
 		}
 
+		// 更新监控上下文
+		reqCtx.Model = claudeReq.Model
+		reqCtx.IsStreaming = claudeReq.Stream
+		reqCtx.UpdateLive()
+
 		// 提取 user_id 用于 Trace 亲和性
 		userID := common.ExtractUserID(bodyBytes)
 
@@ -58,9 +71,9 @@ func Handler(envCfg *config.EnvConfig, cfgManager *config.ConfigManager, channel
 		isMultiChannel := channelScheduler.IsMultiChannelMode(scheduler.ChannelKindMessages)
 
 		if isMultiChannel {
-			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, userID, startTime)
+			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, userID, startTime, reqCtx)
 		} else {
-			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, startTime)
+			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, claudeReq, startTime, reqCtx)
 		}
 	})
 }
@@ -75,6 +88,7 @@ func handleMultiChannel(
 	claudeReq types.ClaudeRequest,
 	userID string,
 	startTime time.Time,
+	reqCtx *common.RequestMonitorContext,
 ) {
 	common.HandleMultiChannelFailover(
 		c,
@@ -90,6 +104,11 @@ func handleMultiChannel(
 			if upstream == nil {
 				return common.MultiChannelAttemptResult{}
 			}
+
+			// 更新监控上下文
+			reqCtx.ChannelIndex = channelIndex
+			reqCtx.ChannelName = upstream.Name
+			reqCtx.UpdateLive()
 
 			provider := providers.GetProvider(upstream.ServiceType)
 			if provider == nil {
@@ -115,7 +134,10 @@ func handleMultiChannel(
 				func(upstream *config.UpstreamConfig, failedKeys map[string]bool) (string, error) {
 					return cfgManager.GetNextAPIKey(upstream, failedKeys, "Messages")
 				},
-				func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+				// NOTE: reqCtx is mutated in closures below; safe because TryUpstreamWithAllKeys executes them synchronously
+			func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+					reqCtx.APIKey = apiKey
+					reqCtx.UpdateLive()
 					req, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
 					return req, err
 				},
@@ -138,6 +160,13 @@ func handleMultiChannel(
 				},
 			)
 
+			// 更新监控上下文
+			if handled {
+				reqCtx.APIKey = successKey
+				reqCtx.Usage = usage
+				reqCtx.Success = true
+			}
+
 			return common.MultiChannelAttemptResult{
 				Handled:           handled,
 				Attempted:         true,
@@ -150,6 +179,12 @@ func handleMultiChannel(
 		},
 		nil,
 		func(ctx *gin.Context, failoverErr *common.FailoverError, lastError error) {
+			reqCtx.Success = false
+			if lastError != nil {
+				reqCtx.ErrorMsg = lastError.Error()
+			} else if failoverErr != nil {
+				reqCtx.ErrorMsg = string(failoverErr.Body)
+			}
 			common.HandleAllChannelsFailed(ctx, cfgManager.GetFuzzyModeEnabled(), failoverErr, lastError, "Messages")
 		},
 	)
@@ -164,6 +199,7 @@ func handleSingleChannel(
 	bodyBytes []byte,
 	claudeReq types.ClaudeRequest,
 	startTime time.Time,
+	reqCtx *common.RequestMonitorContext,
 ) {
 	upstream, err := cfgManager.GetCurrentUpstream()
 	if err != nil {
@@ -173,6 +209,11 @@ func handleSingleChannel(
 		})
 		return
 	}
+
+	// 更新监控上下文
+	reqCtx.ChannelIndex = 0
+	reqCtx.ChannelName = upstream.Name
+	reqCtx.UpdateLive()
 
 	if len(upstream.APIKeys) == 0 {
 		c.JSON(503, gin.H{
@@ -193,7 +234,7 @@ func handleSingleChannel(
 
 	urlResults := common.BuildDefaultURLResults(baseURLs)
 
-	handled, _, _, lastFailoverError, _, lastError := common.TryUpstreamWithAllKeys(
+	handled, successKey, _, lastFailoverError, usage, lastError := common.TryUpstreamWithAllKeys(
 		c,
 		envCfg,
 		cfgManager,
@@ -208,7 +249,10 @@ func handleSingleChannel(
 		func(upstream *config.UpstreamConfig, failedKeys map[string]bool) (string, error) {
 			return cfgManager.GetNextAPIKey(upstream, failedKeys, "Messages")
 		},
+		// NOTE: reqCtx is mutated in closures below; safe because TryUpstreamWithAllKeys executes them synchronously
 		func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+			reqCtx.APIKey = apiKey
+			reqCtx.UpdateLive()
 			req, _, err := provider.ConvertToProviderRequest(c, upstreamCopy, apiKey)
 			return req, err
 		},
@@ -227,9 +271,16 @@ func handleSingleChannel(
 		},
 	)
 	if handled {
+		reqCtx.APIKey = successKey
+		reqCtx.Usage = usage
+		reqCtx.Success = true
 		return
 	}
 
+	reqCtx.Success = false
+	if lastError != nil {
+		reqCtx.ErrorMsg = lastError.Error()
+	}
 	log.Printf("[Messages-Error] 所有API密钥都失败了")
 	common.HandleAllKeysFailed(c, cfgManager.GetFuzzyModeEnabled(), lastFailoverError, lastError, "Messages")
 }

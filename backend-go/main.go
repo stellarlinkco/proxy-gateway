@@ -19,6 +19,8 @@ import (
 	"github.com/BenedictKing/claude-proxy/internal/handlers/gemini"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/messages"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/responses"
+	"github.com/BenedictKing/claude-proxy/internal/handlers/users"
+	"github.com/BenedictKing/claude-proxy/internal/user"
 	"github.com/BenedictKing/claude-proxy/internal/logger"
 	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
@@ -154,6 +156,34 @@ func main() {
 	pricingService := pricing.NewService(pricingInterval)
 	log.Printf("[Pricing-Init] 价格表服务已初始化 (更新间隔: %s)", pricingInterval)
 
+	// Initialize user store (multi-user mode)
+	var userStore *user.Store
+	if envCfg.MultiUserEnabled {
+		var err error
+		userStore, err = user.NewStore(envCfg.UserDBPath)
+		if err != nil {
+			log.Fatalf("Failed to initialize user store: %v", err)
+		}
+		log.Printf("[User-Init] User store initialized: %s", envCfg.UserDBPath)
+
+		// Create default admin user if none exists (uses PROXY_ACCESS_KEY)
+		existingUsers, _ := userStore.ListUsers()
+		if len(existingUsers) == 0 && envCfg.ProxyAccessKey != "" && envCfg.ProxyAccessKey != "your-proxy-access-key" {
+			_, err := userStore.CreateUserWithKey(user.CreateUserRequest{
+				Email: "admin@local",
+				Name:  "Administrator",
+				Role:  "admin",
+			}, envCfg.ProxyAccessKey)
+			if err != nil {
+				log.Printf("[User-Init] Warning: Failed to create default admin: %v", err)
+			} else {
+				log.Printf("[User-Init] Default admin user created with PROXY_ACCESS_KEY")
+			}
+		}
+	} else {
+		log.Printf("[User-Init] Multi-user mode disabled")
+	}
+
 	if envCfg.IsBillingEnabled() {
 		billingClient = billing.NewClient(envCfg.SweAgentBillingURL)
 		log.Printf("[Billing-Init] 计费客户端已初始化: %s", envCfg.SweAgentBillingURL)
@@ -286,10 +316,24 @@ func main() {
 		messagesAPI.GET("/live", liveRequestsHandler.GetLiveRequests)
 		responsesAPI.GET("/live", liveRequestsHandler.GetLiveRequests)
 		geminiAPI.GET("/live", liveRequestsHandler.GetLiveRequests)
+
+		// User management API (only when multi-user mode is enabled)
+		if envCfg.MultiUserEnabled && userStore != nil {
+			apiGroup.GET("/users", users.ListUsers(userStore))
+			apiGroup.POST("/users", users.CreateUser(userStore))
+			apiGroup.GET("/users/:id", users.GetUser(userStore))
+			apiGroup.PUT("/users/:id", users.UpdateUser(userStore))
+			apiGroup.DELETE("/users/:id", users.DeleteUser(userStore))
+			apiGroup.POST("/users/:id/regenerate-key", users.RegenerateAPIKey(userStore))
+			apiGroup.GET("/users/:id/channels", users.GetUserChannels(userStore))
+			apiGroup.PUT("/users/:id/channels", users.SetUserChannels(userStore))
+			apiGroup.GET("/users/:id/usage", users.GetUserUsage(userStore))
+			apiGroup.GET("/me", users.GetCurrentUser(userStore))
+		}
 	}
 
 	// 代理端点 - Messages API
-	messagesHandler := messages.Handler(envCfg, cfgManager, channelScheduler)
+	messagesHandler := messages.Handler(envCfg, cfgManager, channelScheduler, liveRequestManager, metricsStore)
 	r.POST("/v1/messages", messagesHandler)
 	r.POST("/v1/messages/count_tokens", messages.CountTokensHandler(envCfg, cfgManager, channelScheduler))
 
@@ -298,14 +342,14 @@ func main() {
 	r.GET("/v1/models/:model", messages.ModelsDetailHandler(envCfg, cfgManager, channelScheduler))
 
 	// 代理端点 - Responses API
-	responsesHandler := responses.Handler(envCfg, cfgManager, sessionManager, channelScheduler)
+	responsesHandler := responses.Handler(envCfg, cfgManager, sessionManager, channelScheduler, liveRequestManager, metricsStore)
 	r.POST("/v1/responses", responsesHandler)
-	r.POST("/v1/responses/compact", responses.CompactHandler(envCfg, cfgManager, sessionManager, channelScheduler))
+	r.POST("/v1/responses/compact", responses.CompactHandler(envCfg, cfgManager, sessionManager, channelScheduler, liveRequestManager, metricsStore))
 
 	// 代理端点 - Gemini API (原生协议)
 	// 使用通配符捕获 model:action 格式，如 gemini-pro:generateContent
 	// 路径格式：/v1beta/models/{model}:generateContent (Gemini 原生格式)
-	geminiHandler := gemini.Handler(envCfg, cfgManager, channelScheduler)
+	geminiHandler := gemini.Handler(envCfg, cfgManager, channelScheduler, liveRequestManager, metricsStore)
 	r.POST("/v1beta/models/*modelAction", geminiHandler)
 
 	// 静态文件服务 (嵌入的前端)
@@ -352,6 +396,11 @@ func main() {
 	} else {
 		fmt.Printf("[Server-Info] 计费模式: 未启用 (使用单用户模式)\n")
 	}
+	if envCfg.MultiUserEnabled {
+		fmt.Printf("[Server-Info] Multi-user mode: enabled\n")
+	} else {
+		fmt.Printf("[Server-Info] Multi-user mode: disabled (single-key mode)\n")
+	}
 	// 检查是否使用默认密码，给予提示
 	if envCfg.ProxyAccessKey == "your-proxy-access-key" {
 		fmt.Printf("[Server-Warn] 访问密钥: your-proxy-access-key (默认值，建议通过 .env 文件修改)\n")
@@ -381,6 +430,15 @@ func main() {
 		// 创建超时上下文
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
+		// Close user store
+		if userStore != nil {
+			if err := userStore.Close(); err != nil {
+				log.Printf("[User-Shutdown] Warning: Failed to close user store: %v", err)
+			} else {
+				log.Println("[User-Shutdown] User store closed")
+			}
+		}
 
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("[Server-Shutdown] 警告: 服务器关闭时发生错误: %v", err)

@@ -11,6 +11,7 @@ import (
 	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/session"
 	"github.com/BenedictKing/claude-proxy/internal/types"
+	"github.com/BenedictKing/claude-proxy/internal/user"
 	"github.com/BenedictKing/claude-proxy/internal/warmup"
 )
 
@@ -189,6 +190,58 @@ func (s *ChannelScheduler) SelectChannel(
 
 	// 3. 所有健康渠道都失败，选择失败率最低的作为降级
 	return s.selectFallbackChannel(activeChannels, failedChannels, kind)
+}
+
+// SelectChannelWithUserFilter selects channel with user permission filtering
+// If userID is empty or "admin", no filtering is applied
+// If userStore is nil, no filtering is applied
+func (s *ChannelScheduler) SelectChannelWithUserFilter(
+	ctx context.Context,
+	userID string,
+	failedChannels map[int]bool,
+	kind ChannelKind,
+	userStore *user.Store,
+) (*SelectionResult, error) {
+	// For admin users or when no user store, use standard selection
+	if userID == "" || userID == "admin" || userStore == nil {
+		return s.SelectChannel(ctx, userID, failedChannels, kind)
+	}
+
+	// Get user's allowed channels
+	userChannels, err := userStore.GetUserChannels(userID)
+	if err != nil || len(userChannels) == 0 {
+		// No restrictions or error = use standard selection
+		return s.SelectChannel(ctx, userID, failedChannels, kind)
+	}
+
+	// Build allowed index set for this channel kind
+	allowedIndices := make(map[int]bool)
+	for _, uc := range userChannels {
+		if uc.ChannelType == string(kind) {
+			allowedIndices[uc.ChannelIndex] = true
+		}
+	}
+
+	// If no channels allowed for this kind, use standard selection
+	if len(allowedIndices) == 0 {
+		return s.SelectChannel(ctx, userID, failedChannels, kind)
+	}
+
+	// Merge failed channels with disallowed channels
+	mergedFailed := make(map[int]bool)
+	for idx := range failedChannels {
+		mergedFailed[idx] = true
+	}
+
+	// Get all active channels and mark non-allowed ones as "failed"
+	activeChannels := s.getActiveChannels(kind)
+	for _, ch := range activeChannels {
+		if !allowedIndices[ch.Index] {
+			mergedFailed[ch.Index] = true
+		}
+	}
+
+	return s.SelectChannel(ctx, userID, mergedFailed, kind)
 }
 
 // findPromotedChannel 查找处于促销期的渠道

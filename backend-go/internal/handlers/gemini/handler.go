@@ -14,7 +14,9 @@ import (
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/converters"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
+	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
+	"github.com/BenedictKing/claude-proxy/internal/monitor"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/types"
 	"github.com/BenedictKing/claude-proxy/internal/utils"
@@ -27,6 +29,8 @@ func Handler(
 	envCfg *config.EnvConfig,
 	cfgManager *config.ConfigManager,
 	channelScheduler *scheduler.ChannelScheduler,
+	liveRequestManager *monitor.LiveRequestManager,
+	sqliteStore *metrics.SQLiteStore,
 ) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		// Gemini 代理端点统一使用代理访问密钥鉴权（x-api-key / Authorization: Bearer）
@@ -36,6 +40,12 @@ func Handler(
 		}
 
 		startTime := time.Now()
+
+		// 初始化请求监控上下文
+		reqCtx := common.NewRequestMonitorContext("gemini", liveRequestManager, sqliteStore)
+		reqCtx.UpdateLive()
+		defer reqCtx.EndLive()
+		defer reqCtx.Finalize(c)
 
 		// 读取原始请求体
 		maxBodySize := envCfg.MaxRequestBodySize
@@ -80,6 +90,11 @@ func Handler(
 		// 判断是否流式
 		isStream := strings.Contains(c.Request.URL.Path, "streamGenerateContent")
 
+		// 更新监控上下文
+		reqCtx.Model = model
+		reqCtx.IsStreaming = isStream
+		reqCtx.UpdateLive()
+
 		// 提取对话标识用于 Trace 亲和性
 		userID := common.ExtractConversationID(c, bodyBytes)
 
@@ -90,9 +105,9 @@ func Handler(
 		isMultiChannel := channelScheduler.IsMultiChannelMode(scheduler.ChannelKindGemini)
 
 		if isMultiChannel {
-			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, userID, startTime)
+			handleMultiChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, userID, startTime, reqCtx)
 		} else {
-			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, startTime)
+			handleSingleChannel(c, envCfg, cfgManager, channelScheduler, bodyBytes, &geminiReq, model, isStream, startTime, reqCtx)
 		}
 	})
 }
@@ -123,6 +138,7 @@ func handleMultiChannel(
 	isStream bool,
 	userID string,
 	startTime time.Time,
+	reqCtx *common.RequestMonitorContext,
 ) {
 	metricsManager := channelScheduler.GetGeminiMetricsManager()
 	common.HandleMultiChannelFailover(
@@ -139,6 +155,11 @@ func handleMultiChannel(
 			if upstream == nil {
 				return common.MultiChannelAttemptResult{}
 			}
+
+			// 更新监控上下文
+			reqCtx.ChannelIndex = channelIndex
+			reqCtx.ChannelName = upstream.Name
+			reqCtx.UpdateLive()
 
 			baseURLs := upstream.GetAllBaseURLs()
 			sortedURLResults := channelScheduler.GetSortedURLsForChannel(scheduler.ChannelKindGemini, channelIndex, baseURLs)
@@ -158,7 +179,10 @@ func handleMultiChannel(
 				func(upstream *config.UpstreamConfig, failedKeys map[string]bool) (string, error) {
 					return cfgManager.GetNextGeminiAPIKey(upstream, failedKeys)
 				},
+				// NOTE: reqCtx is mutated in closures below; safe because TryUpstreamWithAllKeys executes them synchronously
 				func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+					reqCtx.APIKey = apiKey
+					reqCtx.UpdateLive()
 					return buildProviderRequest(c, upstreamCopy, upstreamCopy.BaseURL, apiKey, geminiReq, model, isStream)
 				},
 				func(apiKey string) {
@@ -175,6 +199,13 @@ func handleMultiChannel(
 				},
 			)
 
+			// 更新监控上下文
+			if handled {
+				reqCtx.APIKey = successKey
+				reqCtx.Usage = usage
+				reqCtx.Success = true
+			}
+
 			return common.MultiChannelAttemptResult{
 				Handled:           handled,
 				Attempted:         true,
@@ -187,6 +218,12 @@ func handleMultiChannel(
 		},
 		nil,
 		func(ctx *gin.Context, failoverErr *common.FailoverError, lastError error) {
+			reqCtx.Success = false
+			if lastError != nil {
+				reqCtx.ErrorMsg = lastError.Error()
+			} else if failoverErr != nil {
+				reqCtx.ErrorMsg = string(failoverErr.Body)
+			}
 			handleAllChannelsFailed(ctx, failoverErr, lastError)
 		},
 	)
@@ -203,6 +240,7 @@ func handleSingleChannel(
 	model string,
 	isStream bool,
 	startTime time.Time,
+	reqCtx *common.RequestMonitorContext,
 ) {
 	upstream, err := cfgManager.GetCurrentGeminiUpstream()
 	if err != nil {
@@ -215,6 +253,11 @@ func handleSingleChannel(
 		})
 		return
 	}
+
+	// 更新监控上下文
+	reqCtx.ChannelIndex = 0
+	reqCtx.ChannelName = upstream.Name
+	reqCtx.UpdateLive()
 
 	if len(upstream.APIKeys) == 0 {
 		c.JSON(503, types.GeminiError{
@@ -231,7 +274,7 @@ func handleSingleChannel(
 	baseURLs := upstream.GetAllBaseURLs()
 	urlResults := common.BuildDefaultURLResults(baseURLs)
 
-	handled, _, _, lastFailoverError, _, lastError := common.TryUpstreamWithAllKeys(
+	handled, successKey, _, lastFailoverError, usage, lastError := common.TryUpstreamWithAllKeys(
 		c,
 		envCfg,
 		cfgManager,
@@ -246,7 +289,10 @@ func handleSingleChannel(
 		func(upstream *config.UpstreamConfig, failedKeys map[string]bool) (string, error) {
 			return cfgManager.GetNextGeminiAPIKey(upstream, failedKeys)
 		},
+		// NOTE: reqCtx is mutated in closures below; safe because TryUpstreamWithAllKeys executes them synchronously
 		func(c *gin.Context, upstreamCopy *config.UpstreamConfig, apiKey string) (*http.Request, error) {
+			reqCtx.APIKey = apiKey
+			reqCtx.UpdateLive()
 			return buildProviderRequest(c, upstreamCopy, upstreamCopy.BaseURL, apiKey, geminiReq, model, isStream)
 		},
 		func(apiKey string) {
@@ -259,9 +305,16 @@ func handleSingleChannel(
 		},
 	)
 	if handled {
+		reqCtx.APIKey = successKey
+		reqCtx.Usage = usage
+		reqCtx.Success = true
 		return
 	}
 
+	reqCtx.Success = false
+	if lastError != nil {
+		reqCtx.ErrorMsg = lastError.Error()
+	}
 	log.Printf("[Gemini-Error] 所有 API密钥都失败了")
 	handleAllKeysFailed(c, lastFailoverError, lastError)
 }

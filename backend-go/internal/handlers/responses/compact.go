@@ -11,7 +11,9 @@ import (
 
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/handlers/common"
+	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/middleware"
+	"github.com/BenedictKing/claude-proxy/internal/monitor"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
 	"github.com/BenedictKing/claude-proxy/internal/session"
 	"github.com/BenedictKing/claude-proxy/internal/utils"
@@ -32,6 +34,8 @@ func CompactHandler(
 	cfgManager *config.ConfigManager,
 	_ *session.SessionManager,
 	channelScheduler *scheduler.ChannelScheduler,
+	liveRequestManager *monitor.LiveRequestManager,
+	sqliteStore *metrics.SQLiteStore,
 ) gin.HandlerFunc {
 	return gin.HandlerFunc(func(c *gin.Context) {
 		// 认证
@@ -39,6 +43,12 @@ func CompactHandler(
 		if c.IsAborted() {
 			return
 		}
+
+		// 初始化请求监控上下文
+		reqCtx := common.NewRequestMonitorContext("responses", liveRequestManager, sqliteStore)
+		reqCtx.UpdateLive()
+		defer reqCtx.EndLive()
+		defer reqCtx.Finalize(c)
 
 		// 读取请求体
 		maxBodySize := envCfg.MaxRequestBodySize
@@ -54,9 +64,9 @@ func CompactHandler(
 		isMultiChannel := channelScheduler.IsMultiChannelMode(scheduler.ChannelKindResponses)
 
 		if isMultiChannel {
-			handleMultiChannelCompact(c, envCfg, cfgManager, channelScheduler, bodyBytes, userID)
+			handleMultiChannelCompact(c, envCfg, cfgManager, channelScheduler, bodyBytes, userID, reqCtx)
 		} else {
-			handleSingleChannelCompact(c, envCfg, cfgManager, bodyBytes)
+			handleSingleChannelCompact(c, envCfg, cfgManager, bodyBytes, reqCtx)
 		}
 	})
 }
@@ -67,12 +77,18 @@ func handleSingleChannelCompact(
 	envCfg *config.EnvConfig,
 	cfgManager *config.ConfigManager,
 	bodyBytes []byte,
+	reqCtx *common.RequestMonitorContext,
 ) {
 	upstream, err := cfgManager.GetCurrentResponsesUpstream()
 	if err != nil {
 		c.JSON(503, gin.H{"error": "未配置任何 Responses 渠道"})
 		return
 	}
+
+	// 更新监控上下文
+	reqCtx.ChannelIndex = 0
+	reqCtx.ChannelName = upstream.Name
+	reqCtx.UpdateLive()
 
 	if len(upstream.APIKeys) == 0 {
 		c.JSON(503, gin.H{"error": "当前渠道未配置 API 密钥"})
@@ -91,6 +107,8 @@ func handleSingleChannelCompact(
 
 		success, compactErr := tryCompactWithKey(c, upstream, apiKey, bodyBytes, envCfg, cfgManager)
 		if success {
+			reqCtx.APIKey = apiKey
+			reqCtx.Success = true
 			return
 		}
 
@@ -134,6 +152,7 @@ func handleMultiChannelCompact(
 	channelScheduler *scheduler.ChannelScheduler,
 	bodyBytes []byte,
 	userID string,
+	reqCtx *common.RequestMonitorContext,
 ) {
 	failedChannels := make(map[int]bool)
 	maxAttempts := channelScheduler.GetActiveChannelCount(scheduler.ChannelKindResponses)
@@ -148,6 +167,11 @@ func handleMultiChannelCompact(
 		upstream := selection.Upstream
 		channelIndex := selection.ChannelIndex
 
+		// 更新监控上下文
+		reqCtx.ChannelIndex = channelIndex
+		reqCtx.ChannelName = upstream.Name
+		reqCtx.UpdateLive()
+
 		// 每个渠道尝试所有 key
 		success, successKey, compactErr := tryCompactChannelWithAllKeys(c, upstream, cfgManager, channelScheduler, bodyBytes, envCfg)
 
@@ -158,6 +182,8 @@ func handleMultiChannelCompact(
 				// 只有真正成功的请求才设置 Trace 亲和
 				channelScheduler.SetTraceAffinity(userID, channelIndex)
 			}
+			reqCtx.APIKey = successKey
+			reqCtx.Success = true
 			return
 		}
 

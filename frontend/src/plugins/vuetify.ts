@@ -106,6 +106,16 @@ import {
   mdiSignature,
   mdiArrowCollapseUp,
   mdiArrowCollapseDown,
+  mdiAccountMultiple,
+  mdiAccountPlus,
+  mdiAccountEdit,
+  mdiAccountRemove,
+  mdiAutorenew,
+  mdiEye,
+  mdiEyeOff,
+  mdiShieldAccount,
+  mdiAccount,
+  mdiEmailOutline,
 } from '@mdi/js'
 
 // 图标名称到 SVG path 的映射 (使用 kebab-case)
@@ -265,6 +275,18 @@ const iconMap: Record<string, string> = {
   // 置顶/置底操作
   'arrow-collapse-up': mdiArrowCollapseUp,
   'arrow-collapse-down': mdiArrowCollapseDown,
+
+  // 用户管理
+  'account-multiple': mdiAccountMultiple,
+  'account-plus': mdiAccountPlus,
+  'account-edit': mdiAccountEdit,
+  'account-remove': mdiAccountRemove,
+  'autorenew': mdiAutorenew,
+  'eye': mdiEye,
+  'eye-off': mdiEyeOff,
+  'shield-account': mdiShieldAccount,
+  'account': mdiAccount,
+  'email-outline': mdiEmailOutline,
 }
 
 // 自定义 SVG iconset - 处理 mdi-xxx 字符串格式

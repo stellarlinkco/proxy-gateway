@@ -7,6 +7,7 @@ import (
 
 	"github.com/BenedictKing/claude-proxy/internal/billing"
 	"github.com/BenedictKing/claude-proxy/internal/config"
+	"github.com/BenedictKing/claude-proxy/internal/user"
 	"github.com/gin-gonic/gin"
 )
 
@@ -80,6 +81,10 @@ func WebAuthMiddleware(envCfg *config.EnvConfig, cfgManager *config.ConfigManage
 			if envCfg.ShouldLog("info") && !(envCfg.QuietPollingLogs && isPollingEndpoint(path)) {
 				log.Printf("[Auth-Success] IP: %s | Path: %s | Time: %s", clientIP, path, timestamp)
 			}
+
+			// Set admin context for user management endpoints
+			c.Set("user_id", "admin")
+			c.Set("user_role", "admin")
 		}
 
 		c.Next()
@@ -205,5 +210,46 @@ func BillingAuthMiddleware(envCfg *config.EnvConfig, billingClient *billing.Clie
 		}
 		c.JSON(401, gin.H{"error": "Invalid API key"})
 		c.Abort()
+	}
+}
+
+// UserAuthMiddleware validates user API keys and enforces spending limits
+// Supports dual mode: multi-user (validates against user store) + legacy single-key (admin access)
+func UserAuthMiddleware(envCfg *config.EnvConfig, userStore *user.Store) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := getAPIKey(c)
+		if apiKey == "" {
+			c.AbortWithStatusJSON(401, gin.H{"error": "Missing API key"})
+			return
+		}
+
+		// Multi-user mode: validate against user store
+		if envCfg.MultiUserEnabled && userStore != nil {
+			u, err := userStore.GetUserByAPIKey(apiKey)
+			if err == nil && u.Status == "active" {
+				// Check spending limits
+				if err := userStore.CheckSpendingLimit(u.ID, 0); err != nil {
+					c.AbortWithStatusJSON(429, gin.H{"error": err.Error()})
+					return
+				}
+				c.Set("user_id", u.ID)
+				c.Set("user_role", u.Role)
+				c.Set("user_email", u.Email)
+				c.Set("multi_user", true)
+				c.Next()
+				return
+			}
+		}
+
+		// Fallback: legacy single-key mode (admin access)
+		if apiKey == envCfg.ProxyAccessKey {
+			c.Set("user_id", "admin")
+			c.Set("user_role", "admin")
+			c.Set("multi_user", false)
+			c.Next()
+			return
+		}
+
+		c.AbortWithStatusJSON(401, gin.H{"error": "Invalid API key"})
 	}
 }
