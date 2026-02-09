@@ -1,38 +1,51 @@
-> ⚠️ **项目已重命名**: 本项目已重命名为 **[CCX](https://github.com/BenedictKing/ccx)**，请访问新仓库获取最新版本和更新。本仓库已归档，不再维护。
-
----
-
 # Claude / Codex / Gemini API Proxy
 
 [![GitHub release](https://img.shields.io/github/v/release/stellarlinkco/proxy-gateway)](https://github.com/stellarlinkco/proxy-gateway/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go)](https://go.dev/)
+[![Vue Version](https://img.shields.io/badge/Vue-3.5-4FC08D?logo=vue.js)](https://vuejs.org/)
 
-一个高性能的 Claude API 代理服务器，支持多种上游 AI 服务提供商（Claude、Codex、Gemini），提供故障转移、多 API 密钥管理和统一入口访问。
+一个高性能的多协议 AI API 代理服务器，支持 Claude Messages API、Codex Responses API 和 Gemini API，提供智能故障转移、多渠道调度、API 密钥轮换和统一入口访问。
 
 ## 🚀 功能特性
+
+### 核心能力
 
 - **🖥️ 一体化架构**: 后端集成前端，单容器部署，完全替代 Nginx
 - **🔐 统一认证**: 一个密钥保护所有入口（前端界面、管理 API、代理 API）
 - **📱 Web 管理面板**: 现代化可视化界面，支持渠道管理、实时监控和配置
-- **三 API 支持**: 同时支持 Claude Messages API (`/v1/messages`)、Codex Responses API (`/v1/responses`) 和 Gemini API
-- **统一入口**: 通过统一端点访问不同的 AI 服务
-- **多上游支持**: 支持 Claude、Codex 和 Gemini 等多种上游服务
-- **🔌 协议转换**: Messages API 支持协议自动转换，统一接入不同上游服务
-- **🎯 智能调度**: 多渠道智能调度器，支持优先级排序、健康检查和自动熔断
+
+### 多协议支持
+
+- **Claude Messages API** (`/v1/messages`) - Anthropic 原生协议
+- **Codex Responses API** (`/v1/responses`) - OpenAI 兼容协议，支持会话管理
+- **Gemini API** (`/v1beta/models/*`) - Google 原生协议
+- **Models API** (`/v1/models`) - 统一模型列表查询
+
+### 智能调度
+
+- **🎯 ChannelKind 统一调度**: 三种 API 类型（Messages/Responses/Gemini）统一调度架构
 - **📊 渠道编排**: 可视化渠道管理，拖拽调整优先级，实时查看健康状态
 - **🔄 Trace 亲和**: 同一用户会话自动绑定到同一渠道，提升一致性体验
+- **⚡ 自动熔断**: 基于滑动窗口算法检测渠道健康度，失败率过高自动熔断
 - **故障转移**: 自动切换到可用渠道，确保服务高可用
 - **多 API 密钥**: 每个上游可配置多个 API 密钥，自动轮换使用（推荐 failover 策略以最大化利用 Prompt Caching）
 - **🧠 缓存统计**: 按 Token 口径展示各渠道缓存读/写与命中率（命中率 = `cache_read_tokens / (cache_read_tokens + input_tokens)`）
 - **增强的稳定性**: 内置上游请求超时与重试机制，确保服务在网络波动时依然可靠
-- **自动重试与密钥降级**: 检测到额度/余额不足等错误时自动切换下一个可用密钥；若后续请求成功，再将失败密钥移动到末尾（降级）；所有密钥均失败时按上游原始错误返回
-- **⚡ 自动熔断**: 基于滑动窗口算法检测渠道健康度，失败率过高自动熔断，15 分钟后自动恢复
-- **双重配置**: 支持命令行工具和 Web 界面管理上游配置
-- **环境变量**: 通过 `.env` 文件灵活配置服务器参数
-- **健康检查**: 内置健康检查端点和实时状态监控
-- **日志系统**: 完整的请求/响应日志记录
-- **📡 支持流式和非流式响应**
-- **🛠️ 支持工具调用**
+- **自动重试与密钥降级**: 检测到额度/余额不足等错误时自动切换下一个可用密钥
+
+### 协议转换
+
+- **🔌 统一接口**: 客户端只需使用 Claude Messages API 格式
+- **🎯 自动转换**: 代理自动处理不同上游（Claude/OpenAI/Gemini）的协议差异
+- **🔌 即插即用**: 无需修改客户端代码即可切换上游服务
+
+### 监控与管理
+
+- **📡 实时请求监控**: 查看正在进行的请求和历史日志
+- **📊 流量统计**: 实时监控各渠道的请求流量、成功率和响应延迟
+- **🔧 双重配置**: 支持命令行工具和 Web 界面管理上游配置
+- **📝 日志系统**: 完整的请求/响应日志记录
 - **💬 会话管理**: Responses API 支持多轮对话的会话跟踪和上下文保持
 
 ## 📸 界面预览
