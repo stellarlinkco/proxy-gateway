@@ -8,9 +8,6 @@ import App from './App.vue'
 import './assets/style.css'
 import { useAuthStore } from './stores/auth'
 
-// 在应用创建前同步初始化认证，避免子组件先发请求触发 401 清空本地密钥
-api.initializeAuth()
-
 const app = createApp(App)
 
 const pinia = createPinia()
