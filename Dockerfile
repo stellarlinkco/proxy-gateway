@@ -4,7 +4,7 @@ FROM node:22-alpine AS frontend-builder
 WORKDIR /src/frontend
 
 COPY frontend/package*.json ./
-RUN npm install --legacy-peer-deps
+RUN npm install --legacy-peer-deps && npm install @rollup/rollup-linux-x64-musl --save-optional
 
 COPY frontend/ ./
 RUN npm run build
