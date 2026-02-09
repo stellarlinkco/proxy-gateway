@@ -177,7 +177,7 @@
     <!-- 主要内容 -->
     <v-main>
       <v-container fluid class="pa-4 pa-md-6">
-        <RequestMonitorView v-if="isMonitorPage" v-model:apiType="activeTab" />
+        <RequestMonitorView v-if="isMonitorPage" v-model:apiType="channelStore.activeTab" />
         <template v-else>
         <!-- 全局统计顶部可折叠卡片（根据当前 Tab 显示对应统计） -->
         <v-card v-if="isAuthenticated" class="mb-4 global-stats-panel">
