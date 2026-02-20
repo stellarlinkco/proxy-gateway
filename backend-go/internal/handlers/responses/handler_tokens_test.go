@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -260,6 +261,163 @@ func TestHandleStreamSuccess_PropagatesReadError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mock read failure") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleStreamSuccess_IgnoresReadErrorAfterCompleted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	requestBody := []byte(`{"model":"gpt-5","input":"hello","stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+
+	reader := &eofToErrorReader{
+		reader: strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"),
+		err:    errors.New("unexpected EOF"),
+	}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(reader),
+	}
+	envCfg := &config.EnvConfig{Env: "production", LogLevel: "error"}
+	originalReq := &types.ResponsesRequest{Model: "gpt-5", Stream: true}
+
+	_, err := handleStreamSuccess(c, resp, "responses", envCfg, time.Now(), originalReq, requestBody)
+	if err != nil {
+		t.Fatalf("expected nil error after completed event, got %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), "\"response.completed\"") {
+		t.Fatalf("missing response.completed event")
+	}
+}
+
+func TestHandleStreamSuccess_CompletedButNonIgnorableReadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	requestBody := []byte(`{"model":"gpt-5","input":"hello","stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+
+	reader := &eofToErrorReader{
+		reader: strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"),
+		err:    errors.New("checksum mismatch"),
+	}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(reader),
+	}
+	envCfg := &config.EnvConfig{Env: "production", LogLevel: "error"}
+	originalReq := &types.ResponsesRequest{Model: "gpt-5", Stream: true}
+
+	_, err := handleStreamSuccess(c, resp, "responses", envCfg, time.Now(), originalReq, requestBody)
+	if err == nil {
+		t.Fatalf("expected non-ignorable read error, got nil")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleStreamSuccess_EOFLikeErrorBeforeCompletedStillFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	requestBody := []byte(`{"model":"gpt-5","input":"hello","stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+
+	reader := &eofToErrorReader{
+		reader: strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"),
+		err:    errors.New("unexpected EOF"),
+	}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(reader),
+	}
+	envCfg := &config.EnvConfig{Env: "production", LogLevel: "error"}
+	originalReq := &types.ResponsesRequest{Model: "gpt-5", Stream: true}
+
+	_, err := handleStreamSuccess(c, resp, "responses", envCfg, time.Now(), originalReq, requestBody)
+	if err == nil {
+		t.Fatalf("expected error before completed event, got nil")
+	}
+}
+
+func TestIsIgnorableStreamReadError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "unexpected EOF", err: errors.New("unexpected EOF"), want: true},
+		{name: "connection reset", err: errors.New("read tcp: connection reset by peer"), want: true},
+		{name: "broken pipe", err: errors.New("write tcp: broken pipe"), want: true},
+		{name: "stream closed", err: errors.New("http2: stream closed"), want: true},
+		{name: "non ignorable", err: errors.New("json checksum mismatch"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isIgnorableStreamReadError(tt.err)
+			if got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleStreamSuccess_ConcurrentIgnoreTailReadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const workers = 24
+	requestBody := []byte(`{"model":"gpt-5","input":"hello","stream":true}`)
+	envCfg := &config.EnvConfig{Env: "production", LogLevel: "error"}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+
+			reader := &eofToErrorReader{
+				reader: strings.NewReader("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"),
+				err:    errors.New("unexpected EOF"),
+			}
+
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(reader),
+			}
+			originalReq := &types.ResponsesRequest{Model: "gpt-5", Stream: true}
+
+			_, err := handleStreamSuccess(c, resp, "responses", envCfg, time.Now(), originalReq, requestBody)
+			errCh <- err
+		}()
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("expected nil error in concurrent completed streams, got %v", err)
+		}
 	}
 }
 

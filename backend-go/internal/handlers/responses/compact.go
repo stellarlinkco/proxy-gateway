@@ -3,6 +3,7 @@ package responses
 
 import (
 	"bytes"
+	"compress/gzip"
 	"io"
 	"log"
 	"net/http"
@@ -300,7 +301,7 @@ func tryCompactWithKey(
 	}
 	defer resp.Body.Close()
 
-	respBody, err := readCompactResponseBody(resp)
+	respBody, decodedGzip, err := readCompactResponseBody(resp)
 	if err != nil {
 		log.Printf("[Compact-Response] 警告: 读取上游响应失败: %v", err)
 		return false, &compactError{status: 502, body: []byte(`{"error":"读取上游响应失败"}`), shouldFailover: true}
@@ -314,16 +315,44 @@ func tryCompactWithKey(
 
 	// 成功
 	utils.ForwardResponseHeaders(resp.Header, c.Writer)
+	if !decodedGzip {
+		forwardCompactContentEncoding(resp.Header, c.Writer)
+	}
 	c.Data(resp.StatusCode, "application/json", respBody)
 	return true, nil
 }
 
-func readCompactResponseBody(resp *http.Response) ([]byte, error) {
+func readCompactResponseBody(resp *http.Response) ([]byte, bool, error) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return utils.DecompressGzipIfNeeded(resp, respBody), nil
+
+	encoding := strings.TrimSpace(resp.Header.Get("Content-Encoding"))
+	if !strings.EqualFold(encoding, "gzip") {
+		return respBody, false, nil
+	}
+
+	gzipReader, err := gzip.NewReader(bytes.NewReader(respBody))
+	if err != nil {
+		return nil, false, err
+	}
+	defer gzipReader.Close()
+
+	decodedBody, err := io.ReadAll(gzipReader)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return decodedBody, true, nil
+}
+
+func forwardCompactContentEncoding(upstreamHeader http.Header, clientWriter http.ResponseWriter) {
+	encoding := strings.TrimSpace(upstreamHeader.Get("Content-Encoding"))
+	if encoding == "" {
+		return
+	}
+	clientWriter.Header().Set("Content-Encoding", encoding)
 }
 
 // buildCompactURL 构建 compact 端点 URL

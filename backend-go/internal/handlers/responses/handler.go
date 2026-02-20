@@ -552,6 +552,7 @@ func handleStreamSuccess(
 	hasUsage := false
 	needTokenPatch := false
 	clientGone := false
+	streamCompleted := false
 	var streamReadErr error
 
 	for {
@@ -645,6 +646,9 @@ func handleStreamSuccess(
 					}
 				} else if flusher != nil {
 					flusher.Flush()
+					if isResponsesCompletedEvent(eventToSend) {
+						streamCompleted = true
+					}
 				}
 			}
 		}
@@ -655,6 +659,15 @@ func handleStreamSuccess(
 		if readErr != nil {
 			streamReadErr = fmt.Errorf("读取上游流失败: %w", readErr)
 			break
+		}
+	}
+
+	if streamReadErr != nil {
+		if streamCompleted && isIgnorableStreamReadError(streamReadErr) {
+			if envCfg.ShouldLog("debug") {
+				log.Printf("[Responses-Stream] 忽略流结束读错误(已完成): %v", streamReadErr)
+			}
+			streamReadErr = nil
 		}
 	}
 
@@ -929,6 +942,18 @@ func isResponsesCompletedEvent(event string) bool {
 func isClientDisconnectError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "broken pipe") || strings.Contains(msg, "connection reset")
+}
+
+func isIgnorableStreamReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "eof") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "stream closed")
 }
 
 // injectResponsesUsageToCompletedEvent 向 response.completed 事件注入 usage
