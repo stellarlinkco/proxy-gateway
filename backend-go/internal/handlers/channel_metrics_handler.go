@@ -813,6 +813,37 @@ func GetGeminiChannelKeyMetricsHistory(metricsManager *metrics.MetricsManager, c
 	}
 }
 
+// GetChannelErrorLogs 获取渠道最近的错误日志
+// GET /api/{messages,responses,gemini}/channels/:id/errors
+func GetChannelErrorLogs(sch *scheduler.ChannelScheduler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		idStr := c.Param("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid channel ID"})
+			return
+		}
+
+		// 从 URL 路径推断 apiType
+		apiType := "Messages"
+		path := c.Request.URL.Path
+		if strings.Contains(path, "/responses/") {
+			apiType = "Responses"
+		} else if strings.Contains(path, "/gemini/") {
+			apiType = "Gemini"
+		}
+
+		errorLog := sch.GetErrorLog()
+		if errorLog == nil {
+			c.JSON(200, gin.H{"errors": []interface{}{}})
+			return
+		}
+
+		entries := errorLog.GetErrors(apiType, id)
+		c.JSON(200, gin.H{"errors": entries})
+	}
+}
+
 // GetGeminiChannelMetrics 获取 Gemini 渠道指标
 func GetGeminiChannelMetrics(metricsManager *metrics.MetricsManager, cfgManager *config.ConfigManager) gin.HandlerFunc {
 	return func(c *gin.Context) {

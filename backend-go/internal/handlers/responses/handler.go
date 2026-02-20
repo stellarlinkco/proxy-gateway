@@ -134,6 +134,7 @@ func handleMultiChannel(
 				"Responses",
 				metricsManager,
 				upstream,
+				channelIndex,
 				sortedURLResults,
 				bodyBytes,
 				responsesReq.Stream,
@@ -241,6 +242,7 @@ func handleSingleChannel(
 		"Responses",
 		metricsManager,
 		upstream,
+		0,
 		urlResults,
 		bodyBytes,
 		responsesReq.Stream,
@@ -297,7 +299,7 @@ func handleSuccess(
 	isStream := originalReq != nil && originalReq.Stream
 
 	if isStream {
-		return handleStreamSuccess(c, resp, upstreamType, envCfg, startTime, originalReq, originalRequestJSON), nil
+		return handleStreamSuccess(c, resp, upstreamType, envCfg, startTime, originalReq, originalRequestJSON)
 	}
 
 	// 非流式响应处理
@@ -515,7 +517,7 @@ func handleStreamSuccess(
 	startTime time.Time,
 	originalReq *types.ResponsesRequest,
 	originalRequestJSON []byte,
-) *types.Usage {
+) (*types.Usage, error) {
 	if envCfg.EnableResponseLogs {
 		responseTime := time.Since(startTime).Milliseconds()
 		log.Printf("[Responses-Stream] Responses 流式响应开始: %dms, 状态: %d", responseTime, resp.StatusCode)
@@ -541,11 +543,7 @@ func handleStreamSuccess(
 
 	c.Status(resp.StatusCode)
 	flusher, _ := c.Writer.(http.Flusher)
-
-	scanner := bufio.NewScanner(resp.Body)
-	const maxCapacity = 1024 * 1024
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, maxCapacity)
+	reader := bufio.NewReader(resp.Body)
 
 	// Token 统计状态
 	var outputTextBuffer bytes.Buffer
@@ -554,9 +552,23 @@ func handleStreamSuccess(
 	hasUsage := false
 	needTokenPatch := false
 	clientGone := false
+	var streamReadErr error
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		rawLine, readErr := reader.ReadString('\n')
+		hasData := len(rawLine) > 0
+		if !hasData {
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				streamReadErr = fmt.Errorf("读取上游流失败: %w", readErr)
+				break
+			}
+			continue
+		}
+
+		line := strings.TrimRight(rawLine, "\r\n")
 
 		if streamLoggingEnabled {
 			logBuffer.WriteString(line + "\n")
@@ -636,10 +648,18 @@ func handleStreamSuccess(
 				}
 			}
 		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			streamReadErr = fmt.Errorf("读取上游流失败: %w", readErr)
+			break
+		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("[Responses-Stream] 警告: 流式响应读取错误: %v", err)
+	if streamReadErr != nil {
+		log.Printf("[Responses-Stream] 警告: 流式响应读取错误: %v", streamReadErr)
 	}
 
 	if envCfg.EnableResponseLogs {
@@ -679,7 +699,7 @@ func handleStreamSuccess(
 		CacheCreation5mInputTokens: collectedUsage.CacheCreation5mInputTokens,
 		CacheCreation1hInputTokens: collectedUsage.CacheCreation1hInputTokens,
 		CacheTTL:                   collectedUsage.CacheTTL,
-	}
+	}, streamReadErr
 }
 
 // responsesStreamUsage 流式响应 usage 收集结构

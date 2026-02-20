@@ -285,6 +285,12 @@
                     </template>
                     <v-list-item-title>测试延迟</v-list-item-title>
                   </v-list-item>
+                  <v-list-item @click="showErrorLogs(element.index, element.name)">
+                    <template #prepend>
+                      <v-icon size="small" color="error">mdi-alert-circle-outline</v-icon>
+                    </template>
+                    <v-list-item-title>错误日志</v-list-item-title>
+                  </v-list-item>
                   <v-list-item @click="setPromotion(element)">
                     <template #prepend>
                       <v-icon size="small" color="info">mdi-rocket-launch</v-icon>
@@ -447,13 +453,60 @@
 
       <div v-else class="text-center py-4 text-medium-emphasis text-caption">所有渠道都处于活跃状态</div>
     </div>
+
+    <!-- 错误日志对话框 -->
+    <v-dialog v-model="errorLogDialog" max-width="700" scrollable>
+      <v-card>
+        <v-card-title class="d-flex align-center justify-space-between">
+          <div class="d-flex align-center ga-2">
+            <v-icon color="error">mdi-alert-circle-outline</v-icon>
+            <span>错误日志 - {{ errorLogChannelName }}</span>
+          </div>
+          <v-btn icon size="small" variant="text" @click="errorLogDialog = false">
+            <v-icon>mdi-close</v-icon>
+          </v-btn>
+        </v-card-title>
+        <v-divider />
+        <v-card-text class="pa-0">
+          <v-progress-linear v-if="errorLogLoading" indeterminate color="primary" />
+          <div v-if="errorLogEntries.length === 0 && !errorLogLoading" class="text-center py-8 text-medium-emphasis">
+            暂无错误记录
+          </div>
+          <v-list v-else density="compact" class="pa-0">
+            <template v-for="(entry, i) in errorLogEntries" :key="i">
+              <v-list-item class="px-4 py-2">
+                <div class="d-flex align-center ga-2 mb-1">
+                  <v-chip
+                    size="x-small"
+                    :color="entry.statusCode >= 500 ? 'error' : entry.statusCode >= 400 ? 'warning' : 'grey'"
+                    variant="tonal"
+                  >
+                    {{ entry.statusCode || 'ERR' }}
+                  </v-chip>
+                  <v-chip v-if="entry.isQuota" size="x-small" color="warning" variant="outlined">
+                    配额
+                  </v-chip>
+                  <span class="text-caption text-medium-emphasis">{{ formatErrorTimestamp(entry.timestamp) }}</span>
+                  <code v-if="entry.keyMask" class="text-caption ml-auto">{{ entry.keyMask }}</code>
+                </div>
+                <div v-if="entry.baseUrl" class="text-caption text-disabled mb-1">
+                  {{ entry.baseUrl }}
+                </div>
+                <div class="text-body-2" style="white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow-y: auto;">{{ entry.message }}</div>
+              </v-list-item>
+              <v-divider v-if="i < errorLogEntries.length - 1" />
+            </template>
+          </v-list>
+        </v-card-text>
+      </v-card>
+    </v-dialog>
   </v-card>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import draggable from 'vuedraggable'
-import { api, type Channel, type ChannelMetrics, type ChannelStatus, type TimeWindowStats, type ChannelRecentActivity } from '../services/api'
+import { api, type Channel, type ChannelMetrics, type ChannelStatus, type TimeWindowStats, type ChannelRecentActivity, type ChannelErrorEntry } from '../services/api'
 import CacheStats from './CacheStats.vue'
 import ChannelStatusBadge from './ChannelStatusBadge.vue'
 import KeyTrendChart from './KeyTrendChart.vue'
@@ -509,6 +562,12 @@ let latencyCheckTimer: ReturnType<typeof setInterval> | null = null
 // 用于触发活跃度视图更新的时间戳（每 2 秒更新）
 const activityUpdateTick = ref(0)
 let activityUpdateTimer: ReturnType<typeof setInterval> | null = null
+
+// 错误日志对话框状态
+const errorLogDialog = ref(false)
+const errorLogChannelName = ref('')
+const errorLogEntries = ref<ChannelErrorEntry[]>([])
+const errorLogLoading = ref(false)
 
 // 图表展开状态
 const expandedChannelIndex = ref<number | null>(null)
@@ -1139,6 +1198,36 @@ const setPromotion = async (channel: Channel) => {
     const errorMessage = error instanceof Error ? error.message : '未知错误'
     emit('error', `设置优先级失败: ${errorMessage}`)
   }
+}
+
+// 查看渠道错误日志
+const showErrorLogs = async (channelIndex: number, channelName: string) => {
+  errorLogChannelName.value = channelName
+  errorLogEntries.value = []
+  errorLogLoading.value = true
+  errorLogDialog.value = true
+  try {
+    const resp = await api.getChannelErrorLogs(props.channelType, channelIndex)
+    errorLogEntries.value = resp.errors || []
+  } catch (err) {
+    console.error('Failed to fetch error logs:', err)
+  } finally {
+    errorLogLoading.value = false
+  }
+}
+
+// 格式化错误日志时间戳
+const formatErrorTimestamp = (timestamp: string) => {
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return timestamp
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date)
 }
 
 // 判断渠道是否可以删除

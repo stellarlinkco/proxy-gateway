@@ -2,13 +2,18 @@ package responses
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/types"
+	"github.com/gin-gonic/gin"
 )
 
 func TestEstimateResponsesOutputFromItems_CoversShapes(t *testing.T) {
@@ -189,4 +194,84 @@ func TestPatchResponsesUsage_CoversBranches(t *testing.T) {
 			t.Fatalf("expected output/total patched: %+v", resp.Usage)
 		}
 	})
+}
+
+func TestHandleStreamSuccess_ReadsLargeLine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	requestBody := []byte(`{"model":"gpt-5","input":"hello","stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+
+	largePayload := strings.Repeat("x", 2*1024*1024)
+	streamBody := "data: " + largePayload + "\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\"}}\n\n"
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(streamBody)),
+	}
+	envCfg := &config.EnvConfig{Env: "production", LogLevel: "error"}
+	originalReq := &types.ResponsesRequest{Model: "gpt-5", Stream: true}
+
+	usage, err := handleStreamSuccess(c, resp, "responses", envCfg, time.Now(), originalReq, requestBody)
+	if err != nil {
+		t.Fatalf("expected no stream read error, got %v", err)
+	}
+	if usage == nil {
+		t.Fatalf("expected usage result, got nil")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "\"response.completed\"") {
+		t.Fatalf("missing response.completed event")
+	}
+	if rec.Body.Len() <= len(largePayload) {
+		t.Fatalf("response body too short: %d", rec.Body.Len())
+	}
+}
+
+func TestHandleStreamSuccess_PropagatesReadError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+
+	requestBody := []byte(`{"model":"gpt-5","input":"hello","stream":true}`)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(requestBody))
+
+	reader := &eofToErrorReader{
+		reader: strings.NewReader("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"),
+		err:    errors.New("mock read failure"),
+	}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(reader),
+	}
+	envCfg := &config.EnvConfig{Env: "production", LogLevel: "error"}
+	originalReq := &types.ResponsesRequest{Model: "gpt-5", Stream: true}
+
+	_, err := handleStreamSuccess(c, resp, "responses", envCfg, time.Now(), originalReq, requestBody)
+	if err == nil {
+		t.Fatalf("expected stream read error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mock read failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type eofToErrorReader struct {
+	reader io.Reader
+	err    error
+}
+
+func (r *eofToErrorReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	if err == io.EOF {
+		return n, r.err
+	}
+	return n, err
 }

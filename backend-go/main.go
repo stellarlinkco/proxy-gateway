@@ -252,6 +252,7 @@ func main() {
 		apiGroup.GET("/messages/channels/scheduler/stats", handlers.GetSchedulerStats(channelScheduler))
 		apiGroup.GET("/messages/global/stats/history", handlers.GetGlobalStatsHistory(messagesMetricsManager))
 		apiGroup.GET("/messages/channels/dashboard", handlers.GetChannelDashboard(cfgManager, channelScheduler))
+		apiGroup.GET("/messages/channels/:id/errors", handlers.GetChannelErrorLogs(channelScheduler))
 		apiGroup.GET("/messages/ping/:id", messages.PingChannel(cfgManager))
 		apiGroup.GET("/messages/ping", messages.PingAllChannels(cfgManager))
 
@@ -277,6 +278,7 @@ func main() {
 		apiGroup.GET("/responses/channels/metrics/history", handlers.GetChannelMetricsHistory(responsesMetricsManager, cfgManager, true))
 		apiGroup.GET("/responses/channels/:id/keys/metrics/history", handlers.GetChannelKeyMetricsHistory(responsesMetricsManager, cfgManager, true))
 		apiGroup.GET("/responses/global/stats/history", handlers.GetGlobalStatsHistory(responsesMetricsManager))
+		apiGroup.GET("/responses/channels/:id/errors", handlers.GetChannelErrorLogs(channelScheduler))
 
 		// Gemini 渠道管理
 		apiGroup.GET("/gemini/channels", gemini.GetUpstreams(cfgManager))
@@ -298,6 +300,7 @@ func main() {
 		apiGroup.GET("/gemini/channels/metrics/history", handlers.GetGeminiChannelMetricsHistory(geminiMetricsManager, cfgManager))
 		apiGroup.GET("/gemini/channels/:id/keys/metrics/history", handlers.GetGeminiChannelKeyMetricsHistory(geminiMetricsManager, cfgManager))
 		apiGroup.GET("/gemini/global/stats/history", handlers.GetGlobalStatsHistory(geminiMetricsManager))
+		apiGroup.GET("/gemini/channels/:id/errors", handlers.GetChannelErrorLogs(channelScheduler))
 		apiGroup.GET("/gemini/ping/:id", gemini.PingChannel(cfgManager))
 		apiGroup.GET("/gemini/ping", gemini.PingAllChannels(cfgManager))
 

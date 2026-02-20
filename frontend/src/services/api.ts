@@ -237,6 +237,18 @@ export interface CacheStatsResponse {
   models: CacheStats
 }
 
+// ============== 渠道错误日志类型 ==============
+
+export interface ChannelErrorEntry {
+  timestamp: string
+  statusCode: number
+  keyMask: string
+  baseUrl: string
+  message: string
+  apiType: string
+  isQuota: boolean
+}
+
 // ============== 请求日志与实时监控类型 ==============
 
 export type ApiType = 'messages' | 'responses' | 'gemini'
@@ -906,6 +918,13 @@ class ApiService {
       method: 'PUT',
       body: JSON.stringify({ strategy })
     })
+  }
+
+  // ============== 渠道错误日志 API ==============
+
+  // 获取渠道最近的错误日志
+  async getChannelErrorLogs(apiType: ApiType, channelId: number): Promise<{ errors: ChannelErrorEntry[] }> {
+    return this.request(`/${apiType}/channels/${channelId}/errors`)
   }
 
   // ============== 请求日志与实时监控 API ==============

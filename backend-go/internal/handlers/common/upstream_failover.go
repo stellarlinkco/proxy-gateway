@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 
+	"time"
+
 	"github.com/BenedictKing/claude-proxy/internal/config"
 	"github.com/BenedictKing/claude-proxy/internal/metrics"
 	"github.com/BenedictKing/claude-proxy/internal/scheduler"
@@ -57,6 +59,7 @@ func TryUpstreamWithAllKeys(
 	apiType string,
 	metricsManager *metrics.MetricsManager,
 	upstream *config.UpstreamConfig,
+	channelIndex int,
 	urlResults []warmup.URLLatencyResult,
 	requestBody []byte,
 	isStream bool,
@@ -153,6 +156,17 @@ func TryUpstreamWithAllKeys(
 				if markURLFailure != nil {
 					markURLFailure(currentBaseURL)
 				}
+				// 记录连接错误日志
+				if errorLog := channelScheduler.GetErrorLog(); errorLog != nil {
+					errorLog.AddError(apiType, channelIndex, metrics.ChannelErrorEntry{
+						Timestamp:  time.Now(),
+						StatusCode: 0,
+						KeyMask:    utils.MaskAPIKey(apiKey),
+						BaseURL:    currentBaseURL,
+						Message:    metrics.TruncateMessage(err.Error(), 500),
+						APIType:    apiType,
+					})
+				}
 				log.Printf("[%s-Key] 警告: API密钥失败: %v", apiType, err)
 				continue
 			}
@@ -177,6 +191,19 @@ func TryUpstreamWithAllKeys(
 					lastFailoverError = &FailoverError{
 						Status: resp.StatusCode,
 						Body:   respBodyBytes,
+					}
+
+					// 记录渠道错误日志
+					if errorLog := channelScheduler.GetErrorLog(); errorLog != nil {
+						errorLog.AddError(apiType, channelIndex, metrics.ChannelErrorEntry{
+							Timestamp:  time.Now(),
+							StatusCode: resp.StatusCode,
+							KeyMask:    utils.MaskAPIKey(apiKey),
+							BaseURL:    currentBaseURL,
+							Message:    metrics.TruncateMessage(string(respBodyBytes), 500),
+							APIType:    apiType,
+							IsQuota:    isQuotaRelated,
+						})
 					}
 
 					if isQuotaRelated {

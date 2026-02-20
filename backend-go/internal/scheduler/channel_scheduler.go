@@ -23,7 +23,8 @@ type ChannelScheduler struct {
 	responsesMetricsManager *metrics.MetricsManager // Responses 渠道指标
 	geminiMetricsManager    *metrics.MetricsManager // Gemini 渠道指标
 	traceAffinity           *session.TraceAffinityManager
-	urlManager              *warmup.URLManager // URL 管理器（非阻塞，动态排序）
+	urlManager              *warmup.URLManager      // URL 管理器（非阻塞，动态排序）
+	errorLog                *metrics.ChannelErrorLog // 渠道错误日志（最近 N 条）
 }
 
 // ChannelKind 标识调度器所处理的渠道类型
@@ -53,6 +54,7 @@ func NewChannelScheduler(
 		geminiMetricsManager:    geminiMetrics,
 		traceAffinity:           traceAffinity,
 		urlManager:              urlMgr,
+		errorLog:                metrics.NewChannelErrorLog(20),
 	}
 }
 
@@ -445,6 +447,11 @@ func (s *ChannelScheduler) GetGeminiMetricsManager() *metrics.MetricsManager {
 // GetTraceAffinityManager 获取 Trace 亲和性管理器
 func (s *ChannelScheduler) GetTraceAffinityManager() *session.TraceAffinityManager {
 	return s.traceAffinity
+}
+
+// GetErrorLog 获取渠道错误日志
+func (s *ChannelScheduler) GetErrorLog() *metrics.ChannelErrorLog {
+	return s.errorLog
 }
 
 // ResetChannelMetrics 重置渠道所有 Key 的熔断/失败状态（保留历史统计）

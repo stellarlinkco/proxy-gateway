@@ -292,14 +292,19 @@ func tryCompactWithKey(
 	utils.SetAuthenticationHeader(req.Header, apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := common.SendRequest(req, upstream, envCfg, false, "Responses")
+	// compact 任务可能耗时较长，使用无总超时客户端，避免在读取响应体阶段被提前中断。
+	resp, err := common.SendRequest(req, upstream, envCfg, true, "Responses")
 	if err != nil {
+		log.Printf("[Compact-Request] 警告: 上游请求失败: %v", err)
 		return false, &compactError{status: 502, body: []byte(`{"error":"上游请求失败"}`), shouldFailover: true}
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-	respBody = utils.DecompressGzipIfNeeded(resp, respBody)
+	respBody, err := readCompactResponseBody(resp)
+	if err != nil {
+		log.Printf("[Compact-Response] 警告: 读取上游响应失败: %v", err)
+		return false, &compactError{status: 502, body: []byte(`{"error":"读取上游响应失败"}`), shouldFailover: true}
+	}
 
 	// 判断是否需要故障转移
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -311,6 +316,14 @@ func tryCompactWithKey(
 	utils.ForwardResponseHeaders(resp.Header, c.Writer)
 	c.Data(resp.StatusCode, "application/json", respBody)
 	return true, nil
+}
+
+func readCompactResponseBody(resp *http.Response) ([]byte, error) {
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return utils.DecompressGzipIfNeeded(resp, respBody), nil
 }
 
 // buildCompactURL 构建 compact 端点 URL
